@@ -4,6 +4,10 @@
     python3 client.py --bus-address-file /run/syndicate-city/bus.address
 
 Type /help for commands. Lines that do not start with '/' are sent as public chat.
+
+    python3 client.py --script demo/p1.txt
+
+plays a scripted game instead of reading the keyboard; see SCRIPT_HELP below.
 """
 
 from __future__ import annotations
@@ -41,9 +45,28 @@ Short forms: /m = /move, /b = /bid, /a = /accept, /r = /reject, /t = /tell, /s =
 ALIASES = {"/m": "/move", "/b": "/bid", "/a": "/accept", "/r": "/reject", "/t": "/tell",
            "/s": "/status", "/p": "/players", "/h": "/help", "/q": "/quit"}
 
+SCRIPT_HELP = """\
+A script is a text file of client commands, run top to bottom. Blank lines and
+lines starting with '#' are ignored. Lines starting with '@' control timing:
+
+@round <n> [negotiation|movement|auction]   wait for that phase (default negotiation);
+                                            if it already passed or never happens
+                                            (no auction that round), skip to the next @round
+@wait <seconds>                             pause, e.g. to pace a conversation
+@accept [player]   @reject [player]         wait for the next offer made to you (from
+                                            that player) and answer it; gives up when
+                                            the phase ends
+@end                                        stop here (the client still waits for the
+                                            final scoreboard, then exits)
+
+Everything else is typed as if at the prompt: /say, /tell, /offer, /move, /bid ..."""
+
+PHASE_ORDER = {"LOBBY": 0, "NEGOTIATION": 1, "MOVEMENT": 2, "AUCTION": 3, "SETTLEMENT": 4}
+SCRIPT_PHASES = ("NEGOTIATION", "MOVEMENT", "AUCTION")
+
 TAGS = {"SERVER": "\033[1;36m", "PUBLIC": "\033[0;37m", "GROUP": "\033[0;35m",
         "PRIVATE": "\033[1;35m", "TRADE": "\033[1;33m", "AUCTION": "\033[1;32m",
-        "ERROR": "\033[1;31m"}
+        "ERROR": "\033[1;31m", "SCRIPT": "\033[1;34m"}
 RESET = "\033[0m"
 DISTRICT_COLORS = {"Blue": "\033[1;34m", "Green": "\033[1;32m", "Purple": "\033[1;35m",
                    "Red": "\033[1;31m"}
@@ -74,6 +97,26 @@ class ClientUI:
         self.movement: Optional[int] = None
         self.deadline = 0.0
         self.running = True
+        self.ended = False
+        self.handled_offers: set[str] = set()
+        self._changed = asyncio.Event()
+
+    # ------------------------------------------------------------ waiting
+
+    def _notify(self) -> None:
+        """Wake every wait_until() so it re-checks its condition."""
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def wait_until(self, pred) -> None:
+        while not pred() and self.running:
+            await self._changed.wait()
+
+    def position(self) -> tuple:
+        """(round, phase) as a sortable key; ENDED sorts after everything."""
+        if self.ended or self.public.get("phase") == "ENDED":
+            return (float("inf"), 0)
+        return (self.public.get("round", 0), PHASE_ORDER.get(self.public.get("phase"), 0))
 
     # ------------------------------------------------------------ rendering
 
@@ -115,6 +158,7 @@ class ClientUI:
         self.bids = {int(k): v for k, v in priv["bids"].items()}
         self.movement = priv.get("movement")
         self.deadline = time.monotonic() + self.public.get("remaining", 0)
+        self._notify()
 
     def render_board(self) -> str:
         owners = self.public.get("owners", {})
@@ -231,6 +275,12 @@ class ClientUI:
     # --------------------------------------------------------------- events
 
     def on_event(self, ev: dict) -> None:
+        self._on_event(ev)
+        if ev["type"] == "MatchEnded":
+            self.ended = True
+        self._notify()
+
+    def _on_event(self, ev: dict) -> None:
         t, d = ev["type"], ev["data"]
         if ev.get("missed_public"):
             self.out("ERROR", f"missed {ev['missed_public']} public update(s); refreshing")
@@ -445,7 +495,93 @@ class ClientUI:
             self.out("ERROR", f"unknown command {clean(cmd)}; try /help")
 
 
+# ------------------------------------------------------------------ scripts
+
+def parse_script(text: str) -> list[tuple[int, str, list]]:
+    """Return [(line_no, kind, args)]; raises ValueError naming the bad line."""
+    steps = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith("@"):
+            steps.append((n, "cmd", [line]))
+            continue
+        word, *rest = line[1:].split()
+        word = word.lower()
+        try:
+            if word == "round" and 1 <= len(rest) <= 2:
+                phase = rest[1].upper() if len(rest) == 2 else "NEGOTIATION"
+                if phase not in SCRIPT_PHASES:
+                    raise ValueError
+                steps.append((n, "round", [int(rest[0]), phase]))
+            elif word == "wait" and len(rest) == 1:
+                steps.append((n, "wait", [max(0.0, float(rest[0]))]))
+            elif word in ("accept", "reject") and len(rest) <= 1:
+                steps.append((n, word, [rest[0].lower() if rest else None]))
+            elif word == "end" and not rest:
+                steps.append((n, "end", []))
+            else:
+                raise ValueError
+        except ValueError:
+            raise ValueError(f"line {n}: cannot understand {line!r}") from None
+    return steps
+
+
+async def run_script(ui: ClientUI, steps: list[tuple[int, str, list]]) -> None:
+    """Play the steps, then stay for the final scoreboard and return."""
+    skipping = False
+    for n, kind, a in steps:
+        if not ui.running:
+            return
+        if kind == "round":
+            target = (a[0], PHASE_ORDER[a[1]])
+            await ui.wait_until(lambda: ui.position() >= target)
+            skipping = ui.position() != target
+            if skipping and not ui.ended:
+                ui.out("SCRIPT", f"skipping round {a[0]} {a[1].lower()} (line {n}): "
+                                 "that phase already passed or did not happen")
+        elif skipping:
+            continue
+        elif kind == "end":
+            break
+        elif kind == "wait":
+            await asyncio.sleep(a[0])
+        elif kind == "cmd":
+            ui.out("SCRIPT", clean(a[0]))
+            await ui.command(a[0])
+        else:   # accept / reject the next offer addressed to us
+            where = ui.position()
+            seen = set(ui.handled_offers)
+
+            def incoming():
+                for o in ui.offers.values():
+                    if (o["buyer"] == ui.me and o["offer_id"] not in seen
+                            and (a[0] is None or a[0] in (o["seller"], ui.name(o["seller"]).lower()))):
+                        return o
+                return None
+            await ui.wait_until(lambda: incoming() is not None or ui.position() != where)
+            o = incoming()
+            if o is None:
+                ui.out("SCRIPT", f"no offer arrived for @{kind} (line {n})")
+                continue
+            ui.handled_offers.add(o["offer_id"])
+            line = f"/{kind} {o['offer_id']}"
+            ui.out("SCRIPT", line)
+            await ui.command(line)
+    await ui.wait_until(lambda: ui.ended)
+    await asyncio.sleep(0.5)      # let the scoreboard print before we disconnect
+
+
 async def run(args) -> int:
+    steps = None
+    if args.script:
+        try:
+            with open(args.script, encoding="utf-8") as fh:
+                steps = parse_script(fh.read())
+        except (OSError, ValueError) as exc:
+            print(f"cannot use script {args.script}: {exc}", file=sys.stderr)
+            return 1
     try:
         address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
     except PermissionError:
@@ -465,8 +601,8 @@ async def run(args) -> int:
     except (ipc.IPCError, ipc.RequestError) as exc:
         print(f"cannot join: {exc}", file=sys.stderr)
         return 1
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    if args.tui:
+    interactive = steps is None and sys.stdin.isatty() and sys.stdout.isatty()
+    if args.tui and steps is None:
         if not interactive:
             print("--tui needs an interactive terminal; using the line client", file=sys.stderr)
         else:
@@ -474,7 +610,8 @@ async def run(args) -> int:
             return await tui.run(conn, snap, color=not args.no_color)
     ui = ClientUI(conn, color=sys.stdout.isatty() and not args.no_color, interactive=interactive)
     ui.apply_snapshot(snap)
-    print(f"Joined as {ui.name(ui.me)} ({ui.me}); coordinator {conn.coordinator}. Type /help.")
+    print(f"Joined as {ui.name(ui.me)} ({ui.me}); coordinator {conn.coordinator}. "
+          + (f"Playing script {args.script}." if steps is not None else "Type /help."))
     print(ui.render_players())
 
     async def pump_events():
@@ -500,7 +637,8 @@ async def run(args) -> int:
                 sys.stdout.write("\r\033[K" + ui.prompt())
                 sys.stdout.flush()
 
-    tasks = [asyncio.ensure_future(pump_events()), asyncio.ensure_future(pump_input())]
+    driver = pump_input() if steps is None else run_script(ui, steps)
+    tasks = [asyncio.ensure_future(pump_events()), asyncio.ensure_future(driver)]
     await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for t in tasks:
         t.cancel()
@@ -510,13 +648,16 @@ async def run(args) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Syndicate City player client")
+    ap = argparse.ArgumentParser(description="Syndicate City player client",
+                                 epilog=SCRIPT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bus-address", help="dedicated bus address (unix:path=...)")
     ap.add_argument("--bus-address-file", default=ipc.default_bus_address_file())
     ap.add_argument("--name", help="display-name suggestion (roster name takes precedence)")
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--tui", action="store_true",
                     help="full-screen interface with a live board, status panel and timer")
+    ap.add_argument("--script", metavar="FILE", help="play the commands in FILE instead of reading "
+                                                     "the keyboard (format below)")
     args = ap.parse_args(argv)
     try:
         return asyncio.run(run(args))

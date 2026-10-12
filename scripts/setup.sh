@@ -55,11 +55,12 @@ for i in $(seq 1 "$PLAYERS"); do
 done
 
 echo "== install tree $SC_INSTALL_DIR"
-install -d -o root -g root -m 0755 "$SC_INSTALL_DIR" "$SC_INSTALL_DIR/tests" "$SC_INSTALL_DIR/scripts" "$SC_INSTALL_DIR/config"
+install -d -o root -g root -m 0755 "$SC_INSTALL_DIR" "$SC_INSTALL_DIR/tests" "$SC_INSTALL_DIR/scripts" "$SC_INSTALL_DIR/config" "$SC_INSTALL_DIR/demo"
 install -o root -g root -m 0644 "$SC_SRC_DIR"/{ipc,server,client,tui,game,board}.py "$SC_SRC_DIR/requirements.txt" "$SC_INSTALL_DIR/"
 install -o root -g root -m 0644 "$SC_SRC_DIR"/tests/*.py "$SC_INSTALL_DIR/tests/"
 install -o root -g root -m 0755 "$SC_SRC_DIR"/scripts/*.py "$SC_INSTALL_DIR/scripts/"
 install -o root -g root -m 0644 "$SC_SRC_DIR/config/bus.conf.in" "$SC_INSTALL_DIR/config/"
+install -o root -g root -m 0644 "$SC_SRC_DIR"/demo/*.txt "$SC_INSTALL_DIR/demo/"
 if [ ! -x "$SC_PYTHON" ]; then
     python3 -m venv "$SC_INSTALL_DIR/venv" || die "python3 -m venv failed: apt install python3-venv"
 fi
@@ -97,3 +98,4 @@ for u in "$SC_SERVER_USER" "${PLAYER_USERS[@]}"; do printf '  %-20s uid=%s\n' "$
 
 echo
 echo "Setup complete. Next: sudo scripts/run_server.sh   then, in 4 terminals: scripts/run_client.sh 1..$PLAYERS"
+echo "Or watch a self-playing match: sudo scripts/demo.sh"

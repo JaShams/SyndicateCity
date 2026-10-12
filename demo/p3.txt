@@ -1,0 +1,45 @@
+# carol (p3). Run with: scripts/run_client.sh 3 --script /opt/syndicate-city/demo/p3.txt
+
+@round 1
+@wait 5
+/say Nobody owns anything yet, bob. Including you.
+@wait 10
+/tell bob Noted.
+@round 1 movement
+/move 3
+@round 1 auction
+@wait 2
+/bid Old Town 150
+@wait 3
+/tell bob Of course not ;)
+
+@round 2
+@wait 1
+/tell dave I'll give you 200 for Dockyard. The Blue district would be mine.
+@accept dave
+@wait 1
+/say Blue district complete. Thanks, dave.
+@round 2 movement
+/move 2
+@round 2 auction
+@wait 1
+/bid Financial 160
+
+@round 3
+@wait 7
+/say Purple is still up for grabs.
+@round 3 movement
+/move 3
+@round 3 auction
+@wait 1
+/bid Warehouse 170
+
+@round 4
+@wait 6
+/tell alice If dave gets Purple he wins. Help me out?
+@round 4 movement
+/move 3
+@round 4 auction
+@wait 1
+/bid Uptown 180
+@end

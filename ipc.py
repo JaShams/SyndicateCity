@@ -442,6 +442,7 @@ class ClientIPC:
     def __init__(self, bus: MessageBus):
         self._bus = bus
         self._coordinator: Optional[str] = None
+        self._started = False
         self._events: asyncio.Queue = asyncio.Queue(maxsize=CLIENT_EVENT_QUEUE)
         self._session = secrets.token_hex(4)
         self._counter = 0
@@ -466,6 +467,7 @@ class ClientIPC:
         except DBusError:
             self._bus.disconnect()
             raise IPCError("the coordinator is not running on this bus") from None
+        self._started = True
         asyncio.ensure_future(self._watch_disconnect())
 
     @property
@@ -499,6 +501,10 @@ class ClientIPC:
             return True
         if msg.interface != INTERFACE or msg.member != EVENT_SIGNAL:
             return False
+        if not self._started:
+            # Arrived between AddMatch and GetNameOwner, so it cannot be verified yet.
+            # Drop it quietly: Join's snapshot supersedes any pre-join broadcast.
+            return True
         # Provenance: only the connection that owned BUS_NAME when we connected.
         if self._coordinator is None or msg.sender != self._coordinator \
                 or msg.path != OBJECT_PATH or msg.signature != "s":

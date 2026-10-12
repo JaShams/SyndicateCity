@@ -78,6 +78,16 @@ When all four players have joined, type `start` in terminal 0. A `start` with pl
 
 **Stop and clean up:** `quit` (or Ctrl-C) in terminal 0 stops the coordinator and the bus. `sudo scripts/stop.sh` stops anything left over. It removes only this project's own runtime files and verifies the PID really is our `dbus-daemon` before killing it.
 
+### Self-playing demo
+
+```bash
+sudo scripts/demo.sh        # needs tmux; ~3 minutes, 4 rounds
+```
+
+This opens one tmux window with the coordinator in a strip on top and four clients below. Each client runs as its own player account and plays a script from `demo/p1.txt`…`p4.txt`. The scripts cover public, private and group chat, a rejected offer followed by a counteroffer, contested sealed bids and district completion. The server's `start` is typed for you once everyone has joined. Ctrl-b d detaches; `sudo tmux kill-session -t syndicate-demo` closes the window.
+
+Any client can play a script: `scripts/run_client.sh 1 --script my-moves.txt`. A script holds ordinary client commands plus `@round <n> [negotiation|movement|auction]`, `@wait <seconds>`, `@accept [player]`, `@reject [player]` and `@end`. The format is printed by `client.py --help` and described in USER_MANUAL §14.
+
 ### Configurable settings
 
 | Flag (server.py / run_server.sh) | Default |
@@ -241,6 +251,7 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 | `tests/test_ipc.py` | Real private `dbus-daemon`: join and roster mapping, unknown UID, duplicate session, public/private/group routing, contiguous `pseq`, a full match, private bid status, crash during auction then rejoin with the bid kept, single coordinator name, no `dbus_next` imports outside `ipc.py` |
 | `tests/test_concurrency.py` | 20 concurrent overbids (no overspend), 10 concurrent accepts (settles once), concurrent replay, simultaneous movement, median ack latency < 250 ms |
 | `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor`, cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
+| `tests/test_script_client.py` | `client.py --script`: the parser, then four scripted client processes play a match covering chat, a trade accepted by `@accept`, an outbid and a skipped auction |
 | `tests/test_processes.py` | Scripted players as separate OS processes. Player 2 is killed with SIGKILL mid-auction and restarted; the logs are then checked with `verify_multiuser.py` |
 | `scripts/integration_multiuser.sh` | The same checks with **four distinct Linux UIDs** plus the service UID. Adversarial probes run as `syndicate-p4` |
 
@@ -253,7 +264,7 @@ scripts/package.sh            # needs report.pdf in the project root
 scripts/package.sh --draft    # review build without the report
 ```
 
-The script checks that every required file is present, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`.
+The archive holds exactly the files git considers part of the project: tracked files plus new files that `.gitignore` does not exclude. To leave something out of the package, add it to `.gitignore`. `report.pdf` is always included when present. The script also checks that the core files are present and not ignored, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`.
 
 ## 10. Files
 
@@ -261,5 +272,6 @@ The script checks that every required file is present, that only `ipc.py` import
 ipc.py        communications library (single file)      game.py    pure rules engine + invariants
 server.py     coordinator: auth binding, lock, clock     board.py   tile table
 client.py     interactive terminal client                config/    bus policy template, roster example
-scripts/      setup, run, stop, tests, package           tests/     unit/integration/security/adversarial
+scripts/      setup, run, stop, demo, tests, package     tests/     unit/integration/security/adversarial
+demo/         p1-p4.txt: scripted players for scripts/demo.sh
 ```

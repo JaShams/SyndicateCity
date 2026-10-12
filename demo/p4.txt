@@ -1,0 +1,47 @@
+# dave (p4). Run with: scripts/run_client.sh 4 --script /opt/syndicate-city/demo/p4.txt
+
+@round 1
+@wait 7
+/tell alice Team up on the Blue district? You take Old Town, I take Dockyard.
+@round 1 movement
+/move 1
+@round 1 auction
+@wait 1
+/bid Dockyard 165
+@wait 3
+/say Dockyard is mine, alice.
+
+@round 2
+@wait 4
+/tell carol 200 and you owe me one.
+@wait 2
+/offer carol Dockyard 200
+@round 2 movement
+/move 2
+@round 2 auction
+@wait 3
+/say Nothing for me this round. Saving up.
+
+@round 3
+@wait 5
+/group bob,carol alice is running away with this.
+@wait 7
+/say Purple is mine.
+@round 3 movement
+/move 3
+@round 3 auction
+@wait 1
+/bid Warehouse 210
+
+@round 4
+@wait 1
+/tell bob Industrial completes my Purple. 260?
+@accept bob
+@wait 1
+/say Purple district complete.
+@round 4 movement
+/move 2
+@round 4 auction
+@wait 2
+/say I'm broke. Go ahead.
+@end

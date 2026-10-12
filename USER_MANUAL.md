@@ -503,6 +503,29 @@ request latency ms: p50=0.48 p95=1.59 max=1.59 (n=14)
 sudo scripts/run_server.sh --rounds 3 --negotiation-seconds 20 --movement-seconds 8 --auction-seconds 12
 ```
 
+**A self-playing demo:** `sudo scripts/demo.sh` (it needs `tmux`) runs a full 4-round match with nobody at the keyboard. The server and four clients share one window, and each client plays its script from `demo/`.
+
+**Scripted players.** `scripts/run_client.sh <n> --script FILE` makes a client play the commands in FILE instead of reading the keyboard. Blank lines and lines starting with `#` are ignored. Any other line is typed exactly as at the prompt, and the window shows it as a `[SCRIPT]` line. Lines starting with `@` control timing:
+
+| Line | Effect |
+|---|---|
+| `@round 2 movement` | Wait for that round and phase (`negotiation`, `movement` or `auction`; default `negotiation`). If the phase already passed, or never happens (no auction that round), everything up to the next `@round` is skipped |
+| `@wait 3` | Pause for 3 seconds, e.g. to pace a conversation |
+| `@accept bob` / `@reject bob` | Wait for the next offer made to you (from bob; any seller if no name is given) and accept or reject it. Gives up when the phase ends |
+| `@end` | Stop reading the script. The client still waits for the final scoreboard, then exits |
+
+```
+@round 1
+@wait 2
+/tell bob Want Dockyard for 180?
+@round 1 movement
+/move 2
+@round 1 auction
+/bid Old Town 150
+```
+
+Keep the phase timers long enough for each script's `@wait`s. The scripts in `demo/` assume the timers `scripts/demo.sh` uses: 25 s negotiation, 6 s movement and 12 s auction.
+
 **Afterwards:** `sudo scripts/stop.sh` cleans up anything left running. An audit log of every action, including private bids, is written to `/var/log/syndicate-city/`. Only the server account (and root) can read it.
 
 ---
