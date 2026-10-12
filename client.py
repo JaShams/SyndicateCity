@@ -481,7 +481,8 @@ async def run(args) -> int:
                 return
             await ui.command(line.decode(errors="replace"))
             if interactive and ui.running:
-                sys.stdout.write(ui.prompt())
+                # out() may already have redrawn the prompt on this line; replace it.
+                sys.stdout.write("\r\033[K" + ui.prompt())
                 sys.stdout.flush()
 
     tasks = [asyncio.ensure_future(pump_events()), asyncio.ensure_future(pump_input())]
