@@ -1,0 +1,52 @@
+# bob (p2). Run with: scripts/run_client.sh 2 --script /opt/syndicate-city/demo/p2.txt
+
+@round 1
+@wait 3
+/say Big talk for someone with zero properties.
+@wait 9
+/group carol,dave alice always overbids. Let her.
+@round 1 movement
+/move 2
+@round 1 auction
+@wait 1
+/bid Old Town 140
+@wait 2
+/tell carol You're not bidding on Old Town, right?
+
+@round 2
+@wait 3
+/tell carol You took Old Town from me. Not forgotten.
+@round 2 movement
+/move 3
+@round 2 auction
+@wait 1
+/bid Financial 170
+@wait 4
+/say Financial District. Finally.
+
+@round 3
+@wait 1
+/tell alice You want Green? Financial is yours for 230.
+@wait 2
+/offer alice Financial 230
+@wait 3
+/tell alice Fine. 200.
+@wait 2
+/offer alice Financial 200
+@round 3 movement
+/move 2
+@round 3 auction
+@wait 1
+/bid Industrial 200
+
+@round 4
+@wait 4
+/offer dave Industrial 260
+@round 4 movement
+/move 3
+@round 4 auction
+@wait 1
+/bid Tech Park 240
+@wait 3
+/say Tech Park. Nobody outbids bob in the last round.
+@end

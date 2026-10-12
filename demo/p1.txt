@@ -1,0 +1,51 @@
+# alice (p1). Run with: scripts/run_client.sh 1 --script /opt/syndicate-city/demo/p1.txt
+# Timings assume scripts/demo.sh: 25s negotiation, 6s movement, 12s auction, 4 rounds.
+
+@round 1
+@wait 1
+/say Morning, syndicate. May the best crook win.
+@wait 9
+/tell dave Maybe. Let's see where we all end up first.
+@round 1 movement
+/move 1
+@round 1 auction
+@wait 1
+/bid Dockyard 150
+@wait 5
+/say We'll see about that, dave.
+
+@round 2
+@wait 2
+/tell dave So much for teaming up.
+@wait 7
+/say Keep an eye on the Green district.
+@round 2 movement
+/move 3
+@round 2 auction
+@wait 1
+/bid Midtown 160
+
+@round 3
+@reject bob
+@wait 1
+/tell bob Too rich. 200 and it's a deal.
+@accept bob
+@wait 1
+/say Green district: complete.
+@round 3 movement
+/move 3
+@round 3 auction
+@wait 1
+/bid Industrial 180
+
+@round 4
+@wait 2
+/say Last round. Spend it all.
+@wait 7
+/tell carol You're on your own. ;)
+@round 4 movement
+/move 3
+@round 4 auction
+@wait 1
+/bid Tech Park 200
+@end

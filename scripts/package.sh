@@ -10,10 +10,11 @@ FILES=(ipc.py server.py client.py game.py board.py README.md requirements.txt re
        config/bus.conf.in config/roster.example.json
        scripts/common.sh scripts/setup.sh scripts/run_server.sh scripts/run_client.sh
        scripts/stop.sh scripts/package.sh scripts/run_tests.sh scripts/integration_multiuser.sh
-       scripts/render_bus_conf.py
+       scripts/render_bus_conf.py scripts/demo.sh demo/p1.txt demo/p2.txt demo/p3.txt demo/p4.txt
        tests/conftest.py tests/helpers.py tests/test_game.py tests/test_ipc.py
        tests/test_concurrency.py tests/test_security.py tests/test_processes.py
        tests/adversarial_client.py tests/scripted_client.py tests/verify_multiuser.py
+       tests/test_script_client.py
        docs/report_outline.md docs/USER_MANUAL.md)
 if [ -f report.pdf ]; then
     FILES+=(report.pdf)
