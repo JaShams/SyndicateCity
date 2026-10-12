@@ -1,0 +1,66 @@
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<!--
+  Syndicate City dedicated game bus. Rendered by scripts/render_bus_conf.py;
+  do not edit the generated copy. The daemon must run as @SERVER_USER@, which
+  also makes BecomeMonitor (bus-level eavesdropping) unavailable to players:
+  dbus-daemon only grants monitoring to root or the daemon's own UID.
+-->
+<busconfig>
+  <type>syndicate-city</type>
+  <listen>unix:path=@SOCKET@</listen>
+  <auth>EXTERNAL</auth>
+
+  <policy context="default">
+    <!-- Who may connect at all: the coordinator account and roster players. -->
+@CONNECT_RULES@
+    <!-- Nobody owns names by default. -->
+    <deny own="*"/>
+    <!-- Default-deny every method call and every signal a client originates. -->
+    <deny send_type="method_call"/>
+    <deny send_type="signal"/>
+    <!-- Replies flow only to callers that asked for them. -->
+    <allow send_requested_reply="true" send_type="method_return"/>
+    <allow send_requested_reply="true" send_type="error"/>
+    <!-- Receiving is allowed only for messages addressed to (or broadcast to)
+         the receiver; no eavesdrop="true" rule exists anywhere. -->
+    <allow receive_type="method_call"/>
+    <allow receive_type="method_return"/>
+    <allow receive_type="error"/>
+    <allow receive_type="signal"/>
+    <!-- Everyone may talk to the bus driver (Hello, AddMatch, GetNameOwner...). -->
+    <allow send_destination="org.freedesktop.DBus" send_interface="org.freedesktop.DBus"/>
+    <allow send_destination="org.freedesktop.DBus" send_interface="org.freedesktop.DBus.Introspectable"/>
+    <allow send_destination="org.freedesktop.DBus" send_interface="org.freedesktop.DBus.Peer"/>
+    <deny send_destination="org.freedesktop.DBus" send_interface="org.freedesktop.DBus.Monitoring"/>
+    <deny send_destination="org.freedesktop.DBus" send_interface="org.freedesktop.DBus"
+          send_member="UpdateActivationEnvironment"/>
+    <!-- Players may only call the coordinator's single Request method. -->
+    <allow send_destination="org.syndicate.City" send_type="method_call"
+           send_interface="org.syndicate.City1" send_member="Request"/>
+    <allow send_destination="org.syndicate.City" send_type="method_call"
+           send_interface="org.freedesktop.DBus.Introspectable"/>
+    <allow send_destination="org.syndicate.City" send_type="method_call"
+           send_interface="org.freedesktop.DBus.Peer"/>
+  </policy>
+
+  <policy user="@SERVER_USER@">
+    <!-- Only the coordinator account may own the service name ... -->
+    <allow own="org.syndicate.City"/>
+    <!-- ... and only it may emit game events (broadcast or addressed). -->
+    <allow send_type="signal" send_interface="org.syndicate.City1" send_member="GameEvent"/>
+  </policy>
+
+  <!-- Resource limits: small messages, few connections per account. -->
+  <limit name="max_message_size">65536</limit>
+  <limit name="max_incoming_bytes">1048576</limit>
+  <limit name="max_outgoing_bytes">1048576</limit>
+  <limit name="max_connections_per_user">@MAX_CONN_PER_USER@</limit>
+  <limit name="max_completed_connections">64</limit>
+  <limit name="max_incomplete_connections">16</limit>
+  <limit name="max_match_rules_per_connection">32</limit>
+  <limit name="max_names_per_connection">4</limit>
+  <limit name="max_replies_per_connection">64</limit>
+  <limit name="reply_timeout">10000</limit>
+  <limit name="auth_timeout">5000</limit>
+</busconfig>

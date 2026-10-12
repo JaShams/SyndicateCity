@@ -1,0 +1,8 @@
+{
+  "players": [
+    {"id": "p1", "user": "syndicate-p1", "name": "alice"},
+    {"id": "p2", "user": "syndicate-p2", "name": "bob"},
+    {"id": "p3", "user": "syndicate-p3", "name": "carol"},
+    {"id": "p4", "user": "syndicate-p4", "name": "dave"}
+  ]
+}

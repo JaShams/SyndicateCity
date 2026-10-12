@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""Syndicate City interactive text client. Run one per Linux player account.
+
+    python3 client.py --bus-address-file /run/syndicate-city/bus.address
+
+Type /help for commands. Lines that do not start with '/' are sent as public chat.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+import time
+from typing import Optional
+
+import board
+import ipc
+from board import TILES
+from game import sanitize_text
+
+HELP = """\
+/help                               this text
+/board                              board, owners, pawns
+/status                             phase, deadline, your cash/bids/offers
+/players                            all players, cash, properties
+/say <message>                      public chat            (NEGOTIATION/AUCTION)
+/tell <player> <message>            private chat
+/group <p1,p2,...> <message>        chat to selected players
+/offer <buyer> <property> <price>   offer one of your properties (NEGOTIATION)
+/offers                             your pending offers
+/accept <offer_id>   /reject <offer_id>   /canceloffer <offer_id>
+/move <1|2|3>                       secret movement choice (MOVEMENT, editable)
+/bid <property> <amount>            sealed bid (AUCTION, replaces previous bid)
+/cancelbid <property>
+/quit
+Properties may be given by tile number or name (e.g. 10 or techpark)."""
+
+TAGS = {"SERVER": "\033[1;36m", "PUBLIC": "\033[0;37m", "GROUP": "\033[0;35m",
+        "PRIVATE": "\033[1;35m", "TRADE": "\033[1;33m", "AUCTION": "\033[1;32m",
+        "ERROR": "\033[1;31m"}
+RESET = "\033[0m"
+
+
+def clean(value) -> str:
+    """Escape anything that came off the wire before it reaches the terminal."""
+    return sanitize_text(str(value))
+
+
+class ClientUI:
+    def __init__(self, conn: ipc.ClientIPC, color: bool, interactive: bool):
+        self.conn = conn
+        self.color = color
+        self.interactive = interactive
+        self.me: Optional[str] = None
+        self.public: dict = {}
+        self.offers: dict[str, dict] = {}
+        self.bids: dict[int, int] = {}
+        self.movement: Optional[int] = None
+        self.deadline = 0.0
+        self.running = True
+
+    # ------------------------------------------------------------ rendering
+
+    def name(self, pid) -> str:
+        for p in self.public.get("players", []):
+            if p["id"] == pid:
+                return clean(p["name"])
+        return clean(pid)
+
+    def prompt(self) -> str:
+        phase = self.public.get("phase", "?")
+        rnd = self.public.get("round", 0)
+        left = max(0, int(self.deadline - time.monotonic())) if self.deadline else 0
+        clock = f" {left}s" if phase in ("NEGOTIATION", "MOVEMENT", "AUCTION") else ""
+        return f"[{self.name(self.me) if self.me else '-'} R{rnd} {phase}{clock}]> "
+
+    def out(self, tag: str, text: str) -> None:
+        rnd = self.public.get("round", 0)
+        phase = self.public.get("phase", "")
+        label = f"[{tag} R{rnd} {phase}]" if rnd else f"[{tag}]"
+        if self.color:
+            label = TAGS.get(tag, "") + label + RESET
+        if self.interactive:
+            sys.stdout.write("\r\033[K")
+        sys.stdout.write(f"{label} {text}\n")
+        if self.interactive and self.running:
+            sys.stdout.write(self.prompt())
+        sys.stdout.flush()
+
+    def apply_snapshot(self, snap: dict) -> None:
+        self.public = snap["public"]
+        priv = snap["private"]
+        self.me = priv["you"]
+        self.offers = {o["offer_id"]: o for o in priv["offers"]}
+        self.bids = {int(k): v for k, v in priv["bids"].items()}
+        self.movement = priv.get("movement")
+        self.deadline = time.monotonic() + self.public.get("remaining", 0)
+
+    def render_board(self) -> str:
+        owners = self.public.get("owners", {})
+        pawns: dict[int, list[str]] = {}
+        for p in self.public.get("players", []):
+            pawns.setdefault(p["pos"], []).append(clean(p["name"]))
+        lines = []
+        for t in TILES:
+            if t.is_property:
+                owner = owners.get(str(t.index))
+                desc = (f"{t.district:<6} value {t.face_value} rent {t.base_rent} "
+                        f"min bid {t.min_bid}  owner: {self.name(owner) if owner else '-'}")
+            elif t.category == "special":
+                desc = f"{'+' if t.cash_effect > 0 else ''}{t.cash_effect} credits"
+            else:
+                desc = f"+{board.START_BONUS} when passing"
+            here = ", ".join(pawns.get(t.index, []))
+            lines.append(f"  {t.index:>2} {t.name:<11} {desc}" + (f"   <- {here}" if here else ""))
+        return "\n".join(lines)
+
+    def render_players(self) -> str:
+        lines = []
+        for p in self.public.get("players", []):
+            props = ", ".join(TILES[i].name for i in p["props"]) or "-"
+            flag = "" if p["connected"] else " (disconnected)"
+            lines.append(f"  {p['id']} {clean(p['name']):<12} cash {p['cash']:>5}  "
+                         f"tile {p['pos']:>2}  {props}{flag}")
+        return "\n".join(lines)
+
+    def render_status(self) -> str:
+        me = next((p for p in self.public.get("players", []) if p["id"] == self.me), None)
+        left = max(0.0, self.deadline - time.monotonic())
+        lines = [f"round {self.public.get('round')}/{self.public.get('rounds')}  "
+                 f"phase {self.public.get('phase')}  ~{left:.0f}s left (server clock decides)"]
+        prio = [self.name(p) for p in self.public.get("priority", [])]
+        lines.append("tie-break priority: " + " > ".join(prio))
+        if me:
+            reserved = sum(self.bids.values())
+            lines.append(f"you: cash {me['cash']}  reserved {reserved}  "
+                         f"available {max(0, me['cash'] - reserved)}  tile {me['pos']}")
+        if self.public.get("auctions"):
+            lines.append("open auctions: " + ", ".join(
+                f"{TILES[t].name} ({t}, min {TILES[t].min_bid})" for t in self.public["auctions"]))
+        if self.bids:
+            lines.append("your bids: " + ", ".join(f"{TILES[t].name}={a}" for t, a in self.bids.items()))
+        if self.movement:
+            lines.append(f"your movement choice: {self.movement}")
+        if self.offers:
+            lines.append(self.render_offers())
+        return "\n".join(lines)
+
+    def render_offers(self) -> str:
+        if not self.offers:
+            return "no pending offers"
+        lines = []
+        for o in self.offers.values():
+            direction = "OUT" if o["seller"] == self.me else "IN "
+            lines.append(f"  {direction} {o['offer_id']}: {self.name(o['seller'])} sells "
+                         f"{TILES[o['property_id']].name} to {self.name(o['buyer'])} for {o['price']}")
+        return "\n".join(lines)
+
+    # --------------------------------------------------------------- events
+
+    def on_event(self, ev: dict) -> None:
+        t, d = ev["type"], ev["data"]
+        if ev.get("missed_public"):
+            self.out("ERROR", f"missed {ev['missed_public']} public update(s); refreshing")
+            asyncio.ensure_future(self.refresh())
+        if t == "BoardUpdated":
+            self.public = d
+            self.deadline = time.monotonic() + d.get("remaining", 0)
+        elif t == "PhaseChanged":
+            self.public.update(round=d["round"], phase=d["phase"], priority=d["priority"],
+                               auctions=d["auctions"], remaining=d["remaining"])
+            self.deadline = time.monotonic() + d["remaining"]
+            if d["phase"] == "NEGOTIATION":
+                self.bids.clear()
+                self.movement = None
+                prio = " > ".join(self.name(p) for p in d["priority"])
+                self.out("SERVER", f"=== Round {d['round']} === NEGOTIATION for {d['remaining']:.0f}s. "
+                                   f"Tie-break priority: {prio}")
+            elif d["phase"] == "MOVEMENT":
+                self.out("SERVER", f"MOVEMENT: choose /move 1|2|3 within {d['remaining']:.0f}s "
+                                   "(default 1)")
+            elif d["phase"] == "AUCTION":
+                self.out("SERVER", f"AUCTION open for {d['remaining']:.0f}s")
+            elif d["phase"] == "SETTLEMENT":
+                self.out("SERVER", "SETTLEMENT")
+        elif t == "MatchStarted":
+            self.out("SERVER", f"Match {clean(d['match'])} started: {d['rounds']} rounds, players "
+                     + ", ".join(clean(p["name"]) for p in d["players"]))
+        elif t in ("PlayerJoined", "PlayerRejoined", "PlayerDisconnected"):
+            verb = {"PlayerJoined": "joined", "PlayerRejoined": "rejoined",
+                    "PlayerDisconnected": "disconnected"}[t]
+            self.out("SERVER", f"{clean(d['name'])} {verb}")
+            if d["player"] != self.me:
+                asyncio.ensure_future(self.refresh())
+        elif t == "ChatMessage":
+            sender = self.name(d["from"])
+            text = clean(d["text"])
+            if d["scope"] == "public":
+                self.out("PUBLIC", f"{sender}: {text}")
+            elif d["scope"] == "private":
+                if d["from"] == self.me:
+                    self.out("PRIVATE", f"you -> {self.name(d['to'][0])}: {text}")
+                else:
+                    self.out("PRIVATE", f"{sender} -> you: {text}")
+            else:
+                to = ",".join(self.name(p) for p in d["to"])
+                self.out("GROUP", f"{sender} -> [{to}]: {text}")
+        elif t in ("TradeOffered", "TradeUpdated"):
+            o = d
+            prop = TILES[o["property_id"]].name
+            if o["status"] == "PENDING":
+                self.offers[o["offer_id"]] = o
+                if o["buyer"] == self.me:
+                    self.out("TRADE", f"{self.name(o['seller'])} offers you {prop} for {o['price']} "
+                                      f"-> /accept {o['offer_id']} or /reject {o['offer_id']}")
+                else:
+                    self.out("TRADE", f"offer {o['offer_id']} sent: {prop} to "
+                                      f"{self.name(o['buyer'])} for {o['price']}")
+            else:
+                self.offers.pop(o["offer_id"], None)
+                self.out("TRADE", f"offer {o['offer_id']} ({prop}, {o['price']}, "
+                                  f"{self.name(o['seller'])} -> {self.name(o['buyer'])}): {o['status']}")
+        elif t == "MovementRevealed":
+            lines = []
+            for m in d["moves"]:
+                fx = []
+                for e in m["effects"]:
+                    if e["kind"] == "start_bonus":
+                        fx.append(f"passed START +{e['amount']}")
+                    elif e["kind"] == "tile":
+                        fx.append(f"{e['tile']} {e['amount']:+d}")
+                    elif e["kind"] == "discovered":
+                        fx.append(f"discovered {TILES[e['property_id']].name}")
+                    elif e["kind"] == "rent":
+                        fx.append(f"paid {e['amount']} rent to {self.name(e['owner'])}")
+                dflt = " (default)" if m["defaulted"] else ""
+                lines.append(f"  {self.name(m['player']):<12} {m['steps']}{dflt}: "
+                             f"{TILES[m['from']].name} -> {TILES[m['to']].name}"
+                             + (f"; {'; '.join(fx)}" if fx else ""))
+            self.out("SERVER", "Movement revealed:\n" + "\n".join(lines))
+            self.movement = None
+        elif t == "AuctionOpened":
+            items = ", ".join(
+                f"{a['name']} [{a['property_id']}] min {a['min_bid']} "
+                f"(found by {', '.join(self.name(x) for x in a['discoverers'])})"
+                for a in d["auctions"])
+            self.out("AUCTION", f"Sealed auctions: {items}. Use /bid <property> <amount>.")
+        elif t == "BidStatus":
+            prop = TILES[d["property_id"]].name
+            status = d["status"]
+            if status == "ACTIVE":
+                self.bids[d["property_id"]] = d["reserved"]
+                self.out("AUCTION", f"your bid on {prop}: {d['reserved']} (available {d['available']})")
+            elif status == "CANCELLED":
+                self.bids.pop(d["property_id"], None)
+                self.out("AUCTION", f"bid on {prop} cancelled (available {d['available']})")
+            else:
+                self.bids.pop(d["property_id"], None)
+                extra = f", paid {d['paid']}" if status == "WON" else ""
+                self.out("AUCTION", f"your bid of {d['amount']} on {prop}: {status}{extra}")
+        elif t == "AuctionClosed":
+            if d["winner"]:
+                disc = f" (incl. -{d['discount']} discoverer discount)" if d.get("discount") else ""
+                self.out("AUCTION", f"{d['name']} won by {self.name(d['winner'])} for {d['paid']}{disc}")
+            else:
+                self.out("AUCTION", f"{d['name']}: no valid bids, stays unowned")
+        elif t == "RoundSettled":
+            self.out("SERVER", f"Round {d['round']} settled.\n{self.render_players()}")
+        elif t == "MatchEnded":
+            lines = []
+            for i, s in enumerate(d["scores"], 1):
+                lines.append(f"  {i}. {clean(s['name']):<12} net worth {s['net_worth']:>5}  "
+                             f"cash {s['cash']:>5}  properties {len(s['properties'])}  "
+                             f"districts {','.join(s['districts']) or '-'}")
+            winners = ", ".join(self.name(w) for w in d["winners"])
+            self.out("SERVER", "MATCH OVER. Final scoreboard:\n" + "\n".join(lines)
+                     + f"\nWinner(s): {winners}")
+        elif t == "Notice":
+            self.out("SERVER", clean(d.get("text", "")))
+        elif t == "_ForgedSignalIgnored":
+            self.out("ERROR", f"ignored a GameEvent signal from non-coordinator {clean(d['sender'])}")
+        elif t in ("_CoordinatorLost", "_BusDisconnected"):
+            self.out("ERROR", f"{clean(d['reason'])}; exiting")
+            self.running = False
+
+    async def refresh(self) -> None:
+        if not self.running or not self.conn.connected:
+            return
+        try:
+            self.apply_snapshot(await self.conn.request("GetSnapshot"))
+        except (ipc.RequestError, ipc.IPCError):
+            pass
+
+    # ------------------------------------------------------------- commands
+
+    async def command(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        if not line.startswith("/"):
+            line = "/say " + line
+        parts = line.split(None, 1)
+        cmd, rest = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+        args = rest.split()
+        try:
+            await self._command(cmd, rest, args)
+        except ipc.RequestError as exc:
+            self.out("ERROR", f"{exc.code}: {clean(exc.message)}")
+        except ipc.IPCError as exc:
+            self.out("ERROR", clean(str(exc)))
+        except (ValueError, IndexError):
+            self.out("ERROR", f"bad arguments for {cmd}; see /help")
+
+    def _prop(self, ref: str) -> int:
+        idx = board.find_property(ref)
+        if idx is None:
+            raise ValueError(ref)
+        return idx
+
+    async def _command(self, cmd: str, rest: str, args: list[str]) -> None:
+        r = self.conn.request
+        if cmd == "/help":
+            print(HELP)
+        elif cmd == "/board":
+            print(self.render_board())
+        elif cmd == "/status":
+            await self.refresh()
+            print(self.render_status())
+        elif cmd == "/players":
+            await self.refresh()
+            print(self.render_players())
+        elif cmd == "/offers":
+            await self.refresh()
+            print(self.render_offers())
+        elif cmd == "/say":
+            await self.conn.send_public(rest)
+        elif cmd == "/tell":
+            to, text = rest.split(None, 1)
+            await self.conn.send_private(to, text)
+        elif cmd == "/group":
+            to, text = rest.split(None, 1)
+            await self.conn.send_group([x for x in to.split(",") if x], text)
+        elif cmd == "/offer":
+            if len(args) < 3:
+                raise ValueError
+            buyer, price = args[0], int(args[-1])
+            await r("CreateTradeOffer", {"buyer": buyer, "property_id": self._prop(" ".join(args[1:-1])),
+                                         "price": price})
+        elif cmd in ("/accept", "/reject", "/canceloffer"):
+            action = {"/accept": "AcceptTradeOffer", "/reject": "RejectTradeOffer",
+                      "/canceloffer": "CancelTradeOffer"}[cmd]
+            res = await r(action, {"offer_id": args[0]})
+            if cmd == "/accept":
+                self.out("TRADE", f"bought {TILES[res['property_id']].name} for {res['price']}")
+        elif cmd == "/move":
+            res = await r("SubmitMovement", {"steps": int(args[0])})
+            self.movement = res["steps"]
+            self.out("SERVER", f"movement choice recorded: {res['steps']} (private until reveal)")
+        elif cmd == "/bid":
+            if len(args) < 2:
+                raise ValueError
+            await r("SubmitBid", {"property_id": self._prop(" ".join(args[:-1])), "amount": int(args[-1])})
+        elif cmd == "/cancelbid":
+            await r("CancelBid", {"property_id": self._prop(rest)})
+        elif cmd in ("/quit", "/exit"):
+            try:
+                await r("Leave", timeout=2.0)
+            except (ipc.RequestError, ipc.IPCError):
+                pass
+            self.running = False
+        else:
+            self.out("ERROR", f"unknown command {clean(cmd)}; try /help")
+
+
+async def run(args) -> int:
+    try:
+        address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
+    except PermissionError:
+        print(f"cannot join: no permission to read {args.bus_address_file} "
+              "(is this account a roster player in the 'syndicate' group?)", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print(f"cannot join: {args.bus_address_file} not found (is the server running?)",
+              file=sys.stderr)
+        return 1
+    except ipc.IPCError as exc:
+        print(f"cannot join: {exc}", file=sys.stderr)
+        return 1
+    try:
+        conn = await ipc.GameIPC.connect_client(address)
+        snap = await conn.join(args.name)
+    except (ipc.IPCError, ipc.RequestError) as exc:
+        print(f"cannot join: {exc}", file=sys.stderr)
+        return 1
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    ui = ClientUI(conn, color=sys.stdout.isatty() and not args.no_color, interactive=interactive)
+    ui.apply_snapshot(snap)
+    print(f"Joined as {ui.name(ui.me)} ({ui.me}); coordinator {conn.coordinator}. Type /help.")
+    print(ui.render_players())
+
+    async def pump_events():
+        async for ev in conn.events():
+            ui.on_event(ev)
+            if not ui.running:
+                return
+
+    async def pump_input():
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+        if interactive:
+            sys.stdout.write(ui.prompt())
+            sys.stdout.flush()
+        while ui.running:
+            line = await reader.readline()
+            if not line:
+                return
+            await ui.command(line.decode(errors="replace"))
+            if interactive and ui.running:
+                sys.stdout.write(ui.prompt())
+                sys.stdout.flush()
+
+    tasks = [asyncio.ensure_future(pump_events()), asyncio.ensure_future(pump_input())]
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in tasks:
+        t.cancel()
+    await conn.close()
+    print()
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Syndicate City player client")
+    ap.add_argument("--bus-address", help="dedicated bus address (unix:path=...)")
+    ap.add_argument("--bus-address-file", default=ipc.default_bus_address_file())
+    ap.add_argument("--name", help="display-name suggestion (roster name takes precedence)")
+    ap.add_argument("--no-color", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        return asyncio.run(run(args))
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
