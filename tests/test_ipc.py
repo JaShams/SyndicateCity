@@ -184,7 +184,7 @@ def test_client_refuses_non_dedicated_bus():
 def test_game_modules_do_not_import_dbus_directly():
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
-    for name in ("server.py", "client.py", "game.py", "board.py"):
+    for name in ("server.py", "client.py", "tui.py", "game.py", "board.py"):
         text = (root / name).read_text()
         assert "dbus_next" not in text, name
     assert "dbus_next" in (root / "ipc.py").read_text()

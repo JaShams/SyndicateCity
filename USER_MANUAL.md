@@ -38,6 +38,14 @@ scripts/run_client.sh 1        # play as player 1 (alice); use 2, 3, 4 ... for t
 
 If you are already logged in as a player account, run `scripts/run_client.sh` with no number.
 
+Prefer a full-screen view with a live board, a status panel and a ticking timer? Add `--tui`:
+
+```bash
+scripts/run_client.sh 1 --tui
+```
+
+Everything in this manual applies to both views; [§2](#full-screen-mode---tui) shows what is different.
+
 On joining you see your identity and the other players:
 
 ```
@@ -87,6 +95,29 @@ In an interactive terminal, your prompt shows your name, the round, the phase an
 ```
 
 The countdown is only a guide. The **server's** clock decides when a phase ends, and an action sent a moment too late is refused even if your countdown still shows time.
+
+### Full-screen mode (`--tui`)
+
+`scripts/run_client.sh <n> --tui` keeps the whole game in view instead of scrolling it away:
+
+* **Top bar:** round, phase and a countdown bar that ticks every second. It turns yellow at 10 s and red at 5 s.
+* **Board:** the 12-tile ring. Each property shows its owner (or price), and each player is a numbered, coloured pawn. Your own tile is outlined in your colour, tiles up for auction are highlighted, and `*` marks doubled rent. The centre shows who holds each district.
+* **Side panel:** your cash, reserved bids, free cash and net worth; offers to and from you; open auctions with minimum bids and your bid; every player's cash and net worth; the tie-break order; and your properties.
+* **Log:** the same tagged lines as the normal client. On terminals 110 columns or wider, chat gets its own column on the right.
+* **Hint line:** what you can do right now, for example `bob offers you Old Town for 230: /accept o3 or /reject o3`.
+
+Keys:
+
+| Key | Does |
+|---|---|
+| `1` `2` `3` | Choose your move during MOVEMENT, when the input line is empty |
+| `Tab` | Complete commands, player names, properties and offer ids (press again to cycle) |
+| `Up` / `Down` | Command history |
+| `PgUp` / `PgDn`, `End` | Scroll the log, jump back to the latest |
+| `F1` or `/help` | Help window (`Esc` closes it) |
+| `Ctrl-C` or `/quit` | Leave the game |
+
+`/board` hides or shows the map, and `/clear` empties the log. The terminal needs to be at least 80×24 to show the board; on smaller terminals the panel and log still work. The terminal bell rings when someone sends you a trade offer or a private or group message. When the match ends, the final scoreboard opens in a window and is printed again after you quit.
 
 ---
 
@@ -367,6 +398,8 @@ There is no early win. Disconnected players stay in the game and simply move 1 e
 | `/bid <property> <amount>` | AUCTION | Place or replace a sealed bid |
 | `/cancelbid <property>` | AUCTION | Withdraw your bid |
 | `/quit` | any | Leave. You stay in the match and can come back (see §13) |
+
+Short forms: `/m` = `/move`, `/b` = `/bid`, `/a` = `/accept`, `/r` = `/reject`, `/t` = `/tell`, `/s` = `/status`, `/p` = `/players`, `/h` = `/help`, `/q` = `/quit`. For example, `/b 1 150` bids 150 on Dockyard.
 
 ---
 

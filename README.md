@@ -70,6 +70,8 @@ scripts/run_client.sh 3
 scripts/run_client.sh 4
 ```
 
+Add `--tui` for the full-screen client (live board, status panel, countdown bar, Tab completion, `1`/`2`/`3` move keys): `scripts/run_client.sh 1 --tui`. It is `tui.py`, a `curses` front end over the same `ClientUI` state and commands, so the line client stays the default and the protocol is unchanged.
+
 Run `id` inside `sudo -u syndicate-p1 bash` to see a player's UID. On the operator console, `players` lists each slot's registered UID.
 
 When all four players have joined, type `start` in terminal 0. A `start` with players missing is refused and nothing changes. Other operator commands are `status` (which also shows request latency percentiles), `players` and `quit`.
@@ -132,6 +134,7 @@ When all four players have joined, type `start` in terminal 0. A `start` with pl
 /say <msg>                     /tell <player> <msg>          /group <p1,p2> <msg>
 /offer <buyer> <property> <price>    /accept <id>   /reject <id>   /canceloffer <id>
 /move <1|2|3>                  /bid <property> <amount>      /cancelbid <property>
+short forms: /m /b /a /r /t /s /p /h /q
 ```
 
 Properties can be given by tile number or name (`10`, `techpark`, `tech park`). A line without a leading `/` is sent as public chat. Every output line is tagged `SERVER / PUBLIC / GROUP / PRIVATE / TRADE / AUCTION / ERROR` along with the round and phase. All text from other players is stripped of terminal control characters before it is printed.

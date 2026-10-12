@@ -56,7 +56,7 @@ done
 
 echo "== install tree $SC_INSTALL_DIR"
 install -d -o root -g root -m 0755 "$SC_INSTALL_DIR" "$SC_INSTALL_DIR/tests" "$SC_INSTALL_DIR/scripts" "$SC_INSTALL_DIR/config"
-install -o root -g root -m 0644 "$SC_SRC_DIR"/{ipc,server,client,game,board}.py "$SC_SRC_DIR/requirements.txt" "$SC_INSTALL_DIR/"
+install -o root -g root -m 0644 "$SC_SRC_DIR"/{ipc,server,client,tui,game,board}.py "$SC_SRC_DIR/requirements.txt" "$SC_INSTALL_DIR/"
 install -o root -g root -m 0644 "$SC_SRC_DIR"/tests/*.py "$SC_INSTALL_DIR/tests/"
 install -o root -g root -m 0755 "$SC_SRC_DIR"/scripts/*.py "$SC_INSTALL_DIR/scripts/"
 install -o root -g root -m 0644 "$SC_SRC_DIR/config/bus.conf.in" "$SC_INSTALL_DIR/config/"

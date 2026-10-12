@@ -35,7 +35,11 @@ HELP = """\
 /bid <property> <amount>            sealed bid (AUCTION, replaces previous bid)
 /cancelbid <property>
 /quit
-Properties may be given by tile number or name (e.g. 10 or techpark)."""
+Properties may be given by tile number or name (e.g. 10 or techpark).
+Short forms: /m = /move, /b = /bid, /a = /accept, /r = /reject, /t = /tell, /s = /status"""
+
+ALIASES = {"/m": "/move", "/b": "/bid", "/a": "/accept", "/r": "/reject", "/t": "/tell",
+           "/s": "/status", "/p": "/players", "/h": "/help", "/q": "/quit"}
 
 TAGS = {"SERVER": "\033[1;36m", "PUBLIC": "\033[0;37m", "GROUP": "\033[0;35m",
         "PRIVATE": "\033[1;35m", "TRADE": "\033[1;33m", "AUCTION": "\033[1;32m",
@@ -98,6 +102,10 @@ class ClientUI:
         if self.interactive and self.running:
             sys.stdout.write(self.prompt())
         sys.stdout.flush()
+
+    def show(self, text: str) -> None:
+        """Untagged command output (/help, /board, /status ...)."""
+        print(text)
 
     def apply_snapshot(self, snap: dict) -> None:
         self.public = snap["public"]
@@ -365,6 +373,7 @@ class ClientUI:
             line = "/say " + line
         parts = line.split(None, 1)
         cmd, rest = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+        cmd = ALIASES.get(cmd, cmd)
         args = rest.split()
         try:
             await self._command(cmd, rest, args)
@@ -384,18 +393,18 @@ class ClientUI:
     async def _command(self, cmd: str, rest: str, args: list[str]) -> None:
         r = self.conn.request
         if cmd == "/help":
-            print(HELP)
+            self.show(HELP)
         elif cmd == "/board":
-            print(self.render_board_list() if args[:1] == ["list"] else self.render_board())
+            self.show(self.render_board_list() if args[:1] == ["list"] else self.render_board())
         elif cmd == "/status":
             await self.refresh()
-            print(self.render_status())
+            self.show(self.render_status())
         elif cmd == "/players":
             await self.refresh()
-            print(self.render_players())
+            self.show(self.render_players())
         elif cmd == "/offers":
             await self.refresh()
-            print(self.render_offers())
+            self.show(self.render_offers())
         elif cmd == "/say":
             await self.conn.send_public(rest)
         elif cmd == "/tell":
@@ -457,6 +466,12 @@ async def run(args) -> int:
         print(f"cannot join: {exc}", file=sys.stderr)
         return 1
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if args.tui:
+        if not interactive:
+            print("--tui needs an interactive terminal; using the line client", file=sys.stderr)
+        else:
+            import tui
+            return await tui.run(conn, snap, color=not args.no_color)
     ui = ClientUI(conn, color=sys.stdout.isatty() and not args.no_color, interactive=interactive)
     ui.apply_snapshot(snap)
     print(f"Joined as {ui.name(ui.me)} ({ui.me}); coordinator {conn.coordinator}. Type /help.")
@@ -500,6 +515,8 @@ def main(argv=None) -> int:
     ap.add_argument("--bus-address-file", default=ipc.default_bus_address_file())
     ap.add_argument("--name", help="display-name suggestion (roster name takes precedence)")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--tui", action="store_true",
+                    help="full-screen interface with a live board, status panel and timer")
     args = ap.parse_args(argv)
     try:
         return asyncio.run(run(args))
