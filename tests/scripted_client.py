@@ -45,7 +45,9 @@ async def play(args) -> int:
                 s = await conn.request("GetSnapshot")
                 cash = s["private"]["available"]
                 for a in d["auctions"]:
-                    amount = a["min_bid"] + rng.randint(0, 40)
+                    if me not in a["discoverers"]:
+                        continue
+                    amount = a["min_bid"] + (rng.randint(0, 40) if a["contested"] else 0)
                     if amount <= cash and rng.random() < 0.7:
                         await conn.request("SubmitBid", {"property_id": a["property_id"],
                                                          "amount": amount})

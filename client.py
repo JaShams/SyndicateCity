@@ -36,8 +36,10 @@ HELP = """\
 /offers                             your pending offers
 /accept <offer_id>   /reject <offer_id>   /canceloffer <offer_id>
 /move <1|2|3>                       secret movement choice (MOVEMENT, editable)
-/bid <property> <amount>            sealed bid (AUCTION, replaces previous bid)
-/cancelbid <property>
+/buy <property>                     buy a property only you landed on, at its value (AUCTION)
+/bid <property> <amount>            sealed bid on a property you and others landed on
+                                    (AUCTION, replaces previous bid)
+/cancelbid <property>               withdraw a /buy or /bid
 /quit
 Properties may be given by tile number or name (e.g. 10 or techpark).
 Short forms: /m = /move, /b = /bid, /a = /accept, /r = /reject, /t = /tell, /s = /status"""
@@ -119,6 +121,13 @@ class ClientUI:
         return (self.public.get("round", 0), PHASE_ORDER.get(self.public.get("phase"), 0))
 
     # ------------------------------------------------------------ rendering
+
+    def sale(self, t: int) -> tuple[bool, int, list]:
+        """(contested, price or minimum bid, landers) for an open sale on tile ``t``."""
+        landers = (self.public.get("landers") or {}).get(str(t), [])
+        if len(landers) > 1:
+            return True, TILES[t].min_bid, landers
+        return False, TILES[t].face_value, landers
 
     def name(self, pid) -> str:
         for p in self.public.get("players", []):
@@ -252,8 +261,13 @@ class ClientUI:
             lines.append(f"you: cash {me['cash']}  reserved {reserved}  "
                          f"available {max(0, me['cash'] - reserved)}  tile {me['pos']}")
         if self.public.get("auctions"):
-            lines.append("open auctions: " + ", ".join(
-                f"{TILES[t].name} ({t}, min {TILES[t].min_bid})" for t in self.public["auctions"]))
+            items = []
+            for t in self.public["auctions"]:
+                contested, price, landers = self.sale(t)
+                who = ", ".join(self.name(x) for x in landers)
+                items.append(f"{TILES[t].name} ({t}, {'auction, min' if contested else 'for sale at'} "
+                             f"{price}, {who})")
+            lines.append("open sales: " + ", ".join(items))
         if self.bids:
             lines.append("your bids: " + ", ".join(f"{TILES[t].name}={a}" for t, a in self.bids.items()))
         if self.movement:
@@ -362,30 +376,43 @@ class ClientUI:
             self.out("SERVER", "Movement revealed:\n" + "\n".join(lines))
             self.movement = None
         elif t == "AuctionOpened":
-            items = ", ".join(
-                f"{a['name']} [{a['property_id']}] min {a['min_bid']} "
-                f"(found by {', '.join(self.name(x) for x in a['discoverers'])})"
-                for a in d["auctions"])
-            self.out("AUCTION", f"Sealed auctions: {items}. Use /bid <property> <amount>.")
+            for a in d["auctions"]:
+                who = ", ".join(self.name(x) for x in a["discoverers"])
+                mine = self.me in a["discoverers"]
+                if a.get("contested"):
+                    how = f" Use /bid {a['property_id']} <amount>." if mine else ""
+                    self.out("AUCTION", f"{a['name']} [{a['property_id']}]: sealed auction between "
+                                        f"{who}, min {a['min_bid']}.{how}")
+                else:
+                    how = f" Use /buy {a['property_id']} to buy it." if mine else ""
+                    self.out("AUCTION", f"{a['name']} [{a['property_id']}]: {who} may buy it for "
+                                        f"{a['min_bid']}.{how}")
         elif t == "BidStatus":
             prop = TILES[d["property_id"]].name
             status = d["status"]
             if status == "ACTIVE":
                 self.bids[d["property_id"]] = d["reserved"]
-                self.out("AUCTION", f"your bid on {prop}: {d['reserved']} (available {d['available']})")
+                what = "your bid on" if self.sale(d["property_id"])[0] else "buying"
+                self.out("AUCTION", f"{what} {prop}: {d['reserved']} reserved "
+                                    f"(available {d['available']}, /cancelbid to withdraw)")
             elif status == "CANCELLED":
                 self.bids.pop(d["property_id"], None)
-                self.out("AUCTION", f"bid on {prop} cancelled (available {d['available']})")
+                what = "bid on" if self.sale(d["property_id"])[0] else "purchase of"
+                self.out("AUCTION", f"{what} {prop} cancelled (available {d['available']})")
             else:
                 self.bids.pop(d["property_id"], None)
-                extra = f", paid {d['paid']}" if status == "WON" else ""
-                self.out("AUCTION", f"your bid of {d['amount']} on {prop}: {status}{extra}")
+                if status == "WON" and not self.sale(d["property_id"])[0]:
+                    self.out("AUCTION", f"you bought {prop} for {d['paid']}")
+                else:
+                    extra = f", paid {d['paid']}" if status == "WON" else ""
+                    self.out("AUCTION", f"your bid of {d['amount']} on {prop}: {status}{extra}")
         elif t == "AuctionClosed":
-            if d["winner"]:
-                disc = f" (incl. -{d['discount']} discoverer discount)" if d.get("discount") else ""
-                self.out("AUCTION", f"{d['name']} won by {self.name(d['winner'])} for {d['paid']}{disc}")
+            if d["winner"] and d.get("contested", True):
+                self.out("AUCTION", f"{d['name']} won by {self.name(d['winner'])} for {d['paid']}")
+            elif d["winner"]:
+                self.out("AUCTION", f"{d['name']} bought by {self.name(d['winner'])} for {d['paid']}")
             else:
-                self.out("AUCTION", f"{d['name']}: no valid bids, stays unowned")
+                self.out("AUCTION", f"{d['name']}: not bought, stays unowned")
         elif t == "RoundSettled":
             self.out("SERVER", f"Round {d['round']} settled.\n{self.render_players()}")
         elif t == "MatchEnded":
@@ -483,6 +510,9 @@ class ClientUI:
             if len(args) < 2:
                 raise ValueError
             await r("SubmitBid", {"property_id": self._prop(" ".join(args[:-1])), "amount": int(args[-1])})
+        elif cmd == "/buy":
+            t = self._prop(rest)
+            await r("SubmitBid", {"property_id": t, "amount": TILES[t].face_value})
         elif cmd == "/cancelbid":
             await r("CancelBid", {"property_id": self._prop(rest)})
         elif cmd in ("/quit", "/exit"):

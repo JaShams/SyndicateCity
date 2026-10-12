@@ -1,6 +1,6 @@
 # Syndicate City — Player's Manual
 
-Syndicate City is a property game for 4–6 players, played in a text terminal. You buy properties in sealed auctions, trade them with rivals, and collect rent. You also choose your moves in secret, at the same moment as everyone else. After seven rounds, the richest player wins.
+Syndicate City is a property game for 4–6 players, played in a text terminal. You buy the properties you land on (bidding against anyone who landed there too), trade them with rivals, and collect rent. You also choose your moves in secret, at the same moment as everyone else. After seven rounds, the richest player wins.
 
 This manual is for **players** and for the **operator** running a game. For installation details and the technical design, see `README.md`.
 
@@ -73,7 +73,7 @@ Every message starts with a tag in brackets: the message type, the round, and th
 ```
 [GROUP R1 NEGOTIATION] bob -> [alice,carol]: group-p2-r1
 [SERVER R1 MOVEMENT] MOVEMENT: choose /move 1|2|3 within 6s (default 1)
-[AUCTION R1 SETTLEMENT] Dockyard won by alice for 185 (incl. -15 discoverer discount)
+[AUCTION R1 SETTLEMENT] Dockyard won by alice for 200
 ```
 
 | Tag | Meaning |
@@ -83,7 +83,7 @@ Every message starts with a tag in brackets: the message type, the round, and th
 | `PRIVATE` | A one-to-one message to or from you |
 | `GROUP` | A message to a chosen group of players that includes you |
 | `TRADE` | Property offers to or from you, and what happened to them |
-| `AUCTION` | Auction openings, your own bids, and results |
+| `AUCTION` | Properties for sale, your own purchases and bids, and results |
 | `ERROR` | Something you did was refused, or a connection problem |
 
 `SERVER`, `TRADE` and `AUCTION` lines can only come from the game server. Another player can type `[SERVER] you won!` into chat, but it will appear as `[PUBLIC ...] bob: [SERVER] you won!`, clearly marked as Bob's message. Chat text is also cleaned of terminal control codes, so nobody can mess up your screen.
@@ -102,7 +102,7 @@ The countdown is only a guide. The **server's** clock decides when a phase ends,
 
 * **Top bar:** round, phase and a countdown bar that ticks every second. It turns yellow at 10 s and red at 5 s.
 * **Board:** the 12-tile ring. Each property shows its owner (or price), and each player is a numbered, coloured pawn. Your own tile is outlined in your colour, tiles up for auction are highlighted, and `*` marks doubled rent. The centre shows who holds each district.
-* **Side panel:** your cash, reserved bids, free cash and net worth; offers to and from you; open auctions with minimum bids and your bid; every player's cash and net worth; the tie-break order; and your properties.
+* **Side panel:** your cash, reserved bids, free cash and net worth; offers to and from you; properties for sale with their price (`>=` marks a contested auction's minimum bid) and your bid; every player's cash and net worth; the tie-break order; and your properties.
 * **Log:** the same tagged lines as the normal client. On terminals 110 columns or wider, chat gets its own column on the right.
 * **Hint line:** what you can do right now, for example `bob offers you Old Town for 230: /accept o3 or /reject o3`.
 
@@ -127,7 +127,7 @@ A match lasts **7 rounds**. The operator can choose fewer for a quick game. Ever
 
 ```
  NEGOTIATION (45 s)  →  MOVEMENT (15 s)  →  AUCTION (25 s, only if needed)  →  SETTLEMENT (instant)
-   chat, trade            secret move          sealed bids                     results, next round
+   chat, trade            secret move          buy or bid                      results, next round
 ```
 
 ### NEGOTIATION — talk and trade
@@ -162,25 +162,31 @@ When the phase ends, everyone's moves are revealed and applied at the same time:
 
 `(default)` means that player did not choose in time. Any number of pawns can share a tile.
 
-### AUCTION — sealed bids on what was discovered
+### AUCTION — buy or bid on what was discovered
 
-If anyone landed on an **unowned** property, that property goes up for auction. If several properties were discovered, they are all auctioned at once. If nothing was discovered, this phase is skipped.
+If anyone landed on an **unowned** property, that property goes on sale, but **only to the players who landed on it**:
+
+* **Only you landed there:** you may buy it at its listed value with `/buy <property>`. Nobody can outbid you. If you don't buy it, it stays unowned.
+* **Several players landed there:** those players, and nobody else, bid for it in a sealed auction with `/bid <property> <amount>`.
+
+Everything discovered this round is on sale at once. If nothing was discovered, this phase is skipped.
 
 ```
 [SERVER R1 AUCTION] AUCTION open for 8s
-[AUCTION R1 AUCTION] Sealed auctions: Dockyard [1] min 128 (found by alice, bob, carol, dave). Use /bid <property> <amount>.
+[AUCTION R1 AUCTION] Dockyard [1]: sealed auction between alice, bob, carol, dave, min 128. Use /bid 1 <amount>.
+[AUCTION R2 AUCTION] Midtown [4]: alice may buy it for 180. Use /buy 4 to buy it.
 ```
 
 ### SETTLEMENT — results
 
-Auctions close, winners pay, and everyone sees the updated standings:
+Purchases and auctions close, buyers pay, and everyone sees the updated standings:
 
 ```
 [SERVER R1 SETTLEMENT] SETTLEMENT
-[AUCTION R1 SETTLEMENT] Dockyard won by alice for 185 (incl. -15 discoverer discount)
-[AUCTION R1 SETTLEMENT] your bid of 200 on Dockyard: WON, paid 185
+[AUCTION R1 SETTLEMENT] Dockyard won by alice for 200
+[AUCTION R1 SETTLEMENT] your bid of 200 on Dockyard: WON, paid 200
 [SERVER R1 SETTLEMENT] Round 1 settled.
-  p1 alice        cash   415  tile  1  Dockyard
+  p1 alice        cash   400  tile  1  Dockyard
   p2 bob          cash   600  tile  1  -
   p3 carol        cash   600  tile  1  -
   p4 dave         cash   600  tile  1  -
@@ -274,21 +280,23 @@ In commands, you can name a property by its tile number or its name: `10`, `tech
 
 ## 6. Auctions
 
-* **Who can bid:** everyone, not just the players who discovered the property.
+* **Who can buy:** only the players who landed on the property this round.
+* **Alone on it?** It's a plain purchase at the listed value (Blue 160, Green 180, Purple 200, Red 220): `/buy <property>`. The money is reserved straight away and paid at settlement; `/cancelbid <property>` changes your mind. There is no auction and no discount.
+* **Shared with others?** Only those players bid, in a sealed auction, using `/bid <property> <amount>`. Everything below applies to these auctions.
 * **Sealed:** nobody sees your bid. After the auction, only the winner and the price they paid are announced; losing bids are never revealed.
 * **Minimum bid** is 80% of the property's value: Blue 128, Green 144, Purple 160, Red 176.
 * **One bid per property.** Bidding again on the same property *replaces* your earlier bid. `/cancelbid <property>` withdraws it.
-* **Your bid is reserved.** The full amount is set aside until the auction ends, so you can't promise the same money twice. For example, with 600 credits you could bid 300 on one property and 300 on another, but not 400 on both.
-* **Highest bid wins.** Losing bids are released when the auction closes.
-* **Discoverer discount:** if you landed on the property this round and you win it, you pay **15 less** than your bid.
+* **Your bid is reserved.** The full amount is set aside until the auction ends, so you can't promise the same money twice, and a bid larger than your available cash is refused.
+* **Highest bid wins** and pays exactly what it bid. Losing bids are released when the auction closes.
 * **Ties** go to whoever comes first in this round's **tie-break priority**. The order is announced at the start of each round and rotates: in round 1 player 1 is first, in round 2 player 2, and so on. The speed of your connection has no effect.
-* **No bids?** The property stays unowned and can be discovered again later.
+* **Nobody buys or bids?** The property stays unowned and can be discovered again later.
 
 ```
 [ERROR R1 AUCTION] BID_TOO_LOW: minimum bid for Dockyard is 128
-[AUCTION R1 AUCTION] your bid on Dockyard: 200 (available 400)
+[ERROR R1 AUCTION] NOT_ELIGIBLE: only players who landed on Old Town can buy it
+[AUCTION R1 AUCTION] your bid on Dockyard: 200 reserved (available 400, /cancelbid to withdraw)
 ...
-[AUCTION R1 SETTLEMENT] Dockyard won by alice for 185 (incl. -15 discoverer discount)
+[AUCTION R1 SETTLEMENT] Dockyard won by alice for 200
 ```
 
 ---
@@ -368,11 +376,11 @@ Cash can be negative, which lowers your score. Ties are broken by more cash, the
   1. dave         net worth   630  cash   630  properties 0  districts -
   2. carol        net worth   624  cash   464  properties 1  districts -
   3. bob          net worth   600  cash   600  properties 0  districts -
-  4. alice        net worth   575  cash   415  properties 1  districts -
+  4. alice        net worth   560  cash   400  properties 1  districts -
 Winner(s): dave
 ```
 
-(In this short two-round game Alice paid 185 for Dockyard, which is worth 160, so the purchase cost her 25 net worth. Nobody landed on it before the game ended, so it never earned any rent to make that back.)
+(In this short two-round game Alice paid 200 for Dockyard, which is worth 160, so the purchase cost her 40 net worth. Nobody landed on it before the game ended, so it never earned any rent to make that back.)
 
 There is no early win. Disconnected players stay in the game and simply move 1 each round until they return.
 
@@ -395,8 +403,9 @@ There is no early win. Disconnected players stay in the game and simply move 1 e
 | `/accept <id>` / `/reject <id>` | NEGOTIATION | Answer an offer made to you |
 | `/canceloffer <id>` | NEGOTIATION | Withdraw your own offer |
 | `/move <1\|2\|3>` | MOVEMENT | Choose your move (changeable until the deadline) |
-| `/bid <property> <amount>` | AUCTION | Place or replace a sealed bid |
-| `/cancelbid <property>` | AUCTION | Withdraw your bid |
+| `/buy <property>` | AUCTION | Buy a property only you landed on, at its listed value |
+| `/bid <property> <amount>` | AUCTION | Place or replace a sealed bid on a property you and others landed on |
+| `/cancelbid <property>` | AUCTION | Withdraw your purchase or bid |
 | `/quit` | any | Leave. You stay in the match and can come back (see §13) |
 
 Short forms: `/m` = `/move`, `/b` = `/bid`, `/a` = `/accept`, `/r` = `/reject`, `/t` = `/tell`, `/s` = `/status`, `/p` = `/players`, `/h` = `/help`, `/q` = `/quit`. For example, `/b 1 150` bids 150 on Dockyard.
@@ -413,8 +422,10 @@ A refused action prints `[ERROR ...] CODE: explanation`, and nothing in the game
 | `DEADLINE_PASSED` | The phase ended just before your command arrived | Too late for this phase |
 | `INVALID_ARGUMENT` | A bad value, e.g. `/move 5` or a price of 0 | Fix the value |
 | `BID_TOO_LOW` | Below the 80% minimum | Bid at least the minimum shown |
+| `FIXED_PRICE` | `/bid` on a property only you landed on | Use `/buy <property>`; the price is its listed value |
+| `NOT_ELIGIBLE` | You didn't land on that property this round | Only its landers can buy or bid |
 | `INSUFFICIENT_FUNDS` | Not enough available cash (debt or other bids count against you) | Lower the bid, or cancel another bid |
-| `NO_AUCTION` | That property isn't up for auction this round | Check `open auctions` in `/status` |
+| `NO_AUCTION` | That property isn't for sale this round | Check `open sales` in `/status` |
 | `NO_BID` | `/cancelbid` on a property you haven't bid on | — |
 | `NOT_OWNER` | You tried to sell a property you don't own | — |
 | `UNKNOWN_OFFER` | No such offer, or it isn't addressed to you | Check `/offers` |
@@ -433,9 +444,9 @@ Typing a command the client doesn't know prints `unknown command /foo; try /help
 ## 12. Strategy tips
 
 * **Completing a district is the big prize.** It doubles your rent on both properties and adds 80 to your final score. If you own one half of a district, its other half is worth more to you than to anyone else, and the player who owns that other half knows it.
-* **Every round, you choose which tiles you might land on.** From any tile you can reach the next three. Use this to avoid a rival's doubled rent, to reach a +30 tile, or to land on an unowned property and earn the discoverer discount.
+* **Every round, you choose which tiles you might land on.** From any tile you can reach the next three. Use this to avoid a rival's doubled rent, to reach a +30 tile, or to land on an unowned property. Land there alone and you can buy it at its listed value. Land with rivals and you must outbid them, but possibly for less than face value.
 * **Watch the tie-break priority.** In a round where you are first in priority, you win every exact tie, so a round number that others are likely to bid is safe for you and risky for them.
-* **Reserved bids lock up your money.** Bidding big on several auctions at once leaves you no money for anything else. A bid you don't really want only blocks your cash, so cancel it.
+* **Reserved bids lock up your money** until settlement, so a big bid leaves you less for anything else that round. A bid you don't really want only blocks your cash, so cancel it.
 * **Keep some money back.** Rent can push you into debt, and a player in debt can't bid or buy. Near the end, every credit of debt counts directly against your score.
 * **Price against face value.** A property is scored at its face value. Buying it below that value (e.g. Dockyard, worth 160, for the 128 minimum) raises your net worth immediately. Paying above it lowers your net worth, and only rent can earn the difference back. With few rounds left, it won't.
 * **Talk privately, and verify publicly.** Anyone can promise anything in chat. Trust `/players` and the auction results instead.
@@ -521,7 +532,7 @@ sudo scripts/run_server.sh --rounds 3 --negotiation-seconds 20 --movement-second
 @round 1 movement
 /move 2
 @round 1 auction
-/bid Old Town 150
+/buy Old Town
 ```
 
 Keep the phase timers long enough for each script's `@wait`s. The scripts in `demo/` assume the timers `scripts/demo.sh` uses: 25 s negotiation, 6 s movement and 12 s auction.

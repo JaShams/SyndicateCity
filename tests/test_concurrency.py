@@ -12,36 +12,22 @@ def run(coro):
     return asyncio.run(asyncio.wait_for(coro, 60))
 
 
-async def to_auction_on(s, c, tiles):
-    """Arrange positions so the given tiles are discovered, then reach AUCTION."""
-    g = s.coord.game
-    await wait_for(c["p1"], "PhaseChanged", pred=lambda e: e["data"]["phase"] == "MOVEMENT")
-    discoverers = list(c)[:len(tiles)]
-    for pid, tile in zip(discoverers, tiles):
-        g.players[pid].position = tile - 1        # test setup: place pawns directly
-    for pid in c:
-        if pid not in discoverers:
-            g.players[pid].position = 8
-    await wait_for(c["p1"], "AuctionOpened")
-
-
 def test_concurrent_bids_cannot_exceed_cash(private_bus):
     async def body():
         s = await Stack(private_bus).start(neg=0.2, mov=0.4, auc=3)
         c = await s.connect_all()
         await s.start_match()
-        await to_auction_on(s, c, [1, 4])
-        attacker = c["p4"]                      # 630 cash after Supply Drop
-        reqs = [attacker.request("SubmitBid", {"property_id": t, "amount": 400})
-                for t in (1, 4) for _ in range(10)]
+        await wait_for(c["p1"], "AuctionOpened")   # everyone defaults onto Dockyard
+        attacker = c["p4"]                         # 600 cash
+        reqs = [attacker.request("SubmitBid", {"property_id": 1, "amount": amt})
+                for amt in (400, 700) for _ in range(10)]
         results = await asyncio.gather(*reqs, return_exceptions=True)
         ok = [r for r in results if isinstance(r, dict)]
         errs = [r for r in results if isinstance(r, ipc.RequestError)]
-        assert ok and errs and all(e.code == "INSUFFICIENT_FUNDS" for e in errs)
+        assert len(ok) == len(errs) == 10
+        assert all(e.code == "INSUFFICIENT_FUNDS" for e in errs)
         g = s.coord.game
-        assert g.reserved("p4") <= g.players["p4"].cash
-        bids = {t: a.active_bids.get("p4") for t, a in g.auctions.items()}
-        assert sum(v for v in bids.values() if v) == 400
+        assert g.reserved("p4") == 400 <= g.players["p4"].cash
         g.check_invariants()
         await s.close()
     run(body())

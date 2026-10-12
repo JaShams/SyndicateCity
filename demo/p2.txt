@@ -40,8 +40,8 @@
 /bid Industrial 200
 
 @round 4
-@wait 4
-/offer dave Industrial 260
+@wait 8
+/say Great. Now dave has Purple too.
 @round 4 movement
 /move 3
 @round 4 auction

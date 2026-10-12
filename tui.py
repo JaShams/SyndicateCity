@@ -34,13 +34,13 @@ PHASE_INFO = {
     "LOBBY": ("waiting for the operator to start", "dim"),
     "NEGOTIATION": ("chat and trade", "TRADE"),
     "MOVEMENT": ("pick 1-3 in secret", "PRIVATE"),
-    "AUCTION": ("sealed bids", "AUCTION"),
+    "AUCTION": ("buy or bid", "AUCTION"),
     "SETTLEMENT": ("settling the round", "SERVER"),
     "ENDED": ("match over", "ERROR"),
 }
 CHAT_TAGS = ("PUBLIC", "PRIVATE", "GROUP")
 COMMANDS = ("/say", "/tell", "/group", "/offer", "/accept", "/reject", "/canceloffer", "/offers",
-            "/move", "/bid", "/cancelbid", "/board", "/status", "/players", "/help", "/clear",
+            "/move", "/buy", "/bid", "/cancelbid", "/board", "/status", "/players", "/help", "/clear",
             "/quit")
 
 HELP_LINES = """\
@@ -67,9 +67,10 @@ MOVING  (MOVEMENT)
   press 1, 2 or 3           secret, can be changed until the deadline
   /move 2                   same thing                   /m
 
-AUCTIONS  (AUCTION)
-  /bid 1 150                sealed bid on tile 1         /b
-  /cancelbid 1              withdraw that bid
+BUYING  (AUCTION)
+  /buy 1                    buy tile 1 at its value, if only you landed there
+  /bid 1 150                sealed bid on tile 1, if you and others landed there  /b
+  /cancelbid 1              withdraw that purchase or bid
 
 OTHER
   /board        hide or show the map     /board list   table with min bids
@@ -415,7 +416,7 @@ class TuiUI(ClientUI):
             pool = others if len(words) == 1 else mine if len(words) == 2 else []
         elif cmd in ("/accept", "/reject", "/canceloffer"):
             pool = list(self.offers)
-        elif cmd in ("/bid", "/cancelbid") and len(words) == 1:
+        elif cmd in ("/buy", "/bid", "/cancelbid") and len(words) == 1:
             auctions = self.public.get("auctions") or []
             pool = [keyname(i) for i in auctions] or [keyname(i) for i in board.PROPERTY_IDS]
         elif cmd == "/board":
@@ -719,13 +720,14 @@ class TuiUI(ClientUI):
 
         auctions = self.public.get("auctions") or []
         if auctions and self.public.get("phase") in ("AUCTION", "SETTLEMENT"):
-            head("AUCTIONS", "      min  you ")
+            head("FOR SALE", "     price  you ")
             for t in auctions:
                 tile = TILES[t]
                 bid = self.bids.get(t)
+                contested, price, _ = self.sale(t)
                 rows.append([(f"{t:>2} ", curses.A_BOLD),
                              (f"{tile.name:<10}", self.district_attr[tile.district]),
-                             (f"  {tile.min_bid:>3}", curses.A_DIM),
+                             (f" {'>=' if contested else '  '}{price:>3}", curses.A_DIM),
                              (f"  {bid:>3}" if bid else "    -",
                               a["AUCTION"] if bid else curses.A_DIM)])
 
@@ -857,11 +859,17 @@ class TuiUI(ClientUI):
                         a["PRIVATE"])
             return "Press 1, 2 or 3 to choose your move (secret). No choice = 1.", a["warn"]
         if phase == "AUCTION":
-            auctions = self.public.get("auctions") or []
-            if auctions:
-                t = auctions[0]
-                return (f"Sealed bids: /bid <tile> <amount>, e.g. /bid {t} {TILES[t].min_bid}"
+            mine = [t for t in self.public.get("auctions") or [] if self.me in self.sale(t)[2]]
+            if mine:
+                t = mine[0]
+                contested, price, landers = self.sale(t)
+                if contested:
+                    rivals = ", ".join(self.name(x) for x in landers if x != self.me)
+                    return (f"Sealed bid vs {rivals}: /bid {t} <amount> (min {price})"
+                            f"   /cancelbid {t} withdraws", a["AUCTION"])
+                return (f"Buy {TILES[t].name} for {price}: /buy {t}"
                         f"   /cancelbid {t} withdraws", a["AUCTION"])
+            return "Nothing for you to buy this round. Type to chat.", curses.A_DIM
         if phase == "NEGOTIATION":
             return ("Type to chat.  /tell <name> msg   /offer <buyer> <property> <price>   "
                     "Tab completes", curses.A_DIM)
@@ -885,7 +893,7 @@ class TuiUI(ClientUI):
         room = W - x - 1
         if not self.buf:
             ph = {"MOVEMENT": "press 1, 2 or 3",
-                  "AUCTION": "/bid <tile> <amount>, or type to chat"}.get(
+                  "AUCTION": "/buy <tile>, /bid <tile> <amount>, or type to chat"}.get(
                 self.public.get("phase"), "type a message, or / for commands (Tab completes)")
             self.put(y, x, ph, curses.A_DIM, room)
             cx = x

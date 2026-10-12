@@ -10,7 +10,6 @@ from typing import Optional
 BOARD_SIZE = 12
 START_TILE = 0
 START_BONUS = 50
-DISCOVERER_DISCOUNT = 15
 DISTRICT_BONUS = 80          # net-worth bonus per completed district
 MIN_BID_RATIO = (4, 5)       # minimum bid = ceil(0.8 * face_value)
 

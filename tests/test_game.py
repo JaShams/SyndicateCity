@@ -189,23 +189,50 @@ def discover(g, tile=1, who=("p1",)):
     return g
 
 
-def test_one_auction_for_shared_discovery_and_discount():
+def test_one_auction_for_shared_discovery_no_discount():
     g = discover(new_game(), 1, ("p1", "p2"))
     assert list(g.auctions) == [1] and g.auctions[1].discoverer_ids == {"p1", "p2"}
+    assert g.auctions[1].contested and g.auctions[1].min_bid == 128
     t = now(g)
     g.submit_bid("p2", 1, 200, t)
-    g.submit_bid("p3", 1, 190, t)
+    g.submit_bid("p1", 1, 190, t)
     events = end_phase(g)
     closed = [e for e in events if e.type == "AuctionClosed"][0].data
-    assert closed["winner"] == "p2" and closed["paid"] == 185
-    assert g.players["p2"].cash == 600 - 185
+    assert closed["winner"] == "p2" and closed["paid"] == 200 and closed["contested"]
+    assert g.players["p2"].cash == 600 - 200
     assert g.properties[1].owner_id == "p2"
-    assert g.players["p3"].cash == 630          # Supply Drop; losing reservation released
-    assert g.reserved("p3") == 0
+    assert g.players["p1"].cash == 600 and g.reserved("p1") == 0   # losing reservation released
+
+
+def test_only_landers_can_bid():
+    g = discover(new_game(), 1, ("p1", "p2"))
+    with pytest.raises(GameError) as e:
+        g.submit_bid("p3", 1, 200, now(g))
+    assert e.value.code == "NOT_ELIGIBLE"
+
+
+def test_single_lander_buys_at_listed_price():
+    g = discover(new_game(), 4)
+    a = g.auctions[4]
+    assert not a.contested and a.min_bid == 180
+    assert g.public_snapshot(now(g))["landers"] == {"4": ["p1"]}
+    t = now(g)
+    with pytest.raises(GameError) as e:
+        g.submit_bid("p2", 4, 180, t)
+    assert e.value.code == "NOT_ELIGIBLE"
+    for amount in (144, 179, 181, 300):
+        with pytest.raises(GameError) as e:
+            g.submit_bid("p1", 4, amount, t)
+        assert e.value.code == "FIXED_PRICE"
+    g.submit_bid("p1", 4, 180, t)
+    closed = [e for e in end_phase(g) if e.type == "AuctionClosed"][0].data
+    assert closed == {"property_id": 4, "name": "Midtown", "winner": "p1",
+                      "paid": 180, "contested": False}
+    assert g.players["p1"].cash == 600 - 180 and g.properties[4].owner_id == "p1"
 
 
 def test_bid_minimum_phase_and_cash_checks():
-    g = discover(new_game(), 4)
+    g = discover(new_game(), 4, ("p1", "p2"))
     t = now(g)
     with pytest.raises(GameError) as e:
         g.submit_bid("p1", 4, 143, t)
@@ -225,30 +252,31 @@ def test_bid_minimum_phase_and_cash_checks():
     assert e.value.code == "INSUFFICIENT_FUNDS"
 
 
+def test_single_lander_cannot_buy_without_cash():
+    g = discover(new_game(), 10)
+    g.players["p1"].cash = 219
+    with pytest.raises(GameError) as e:
+        g.submit_bid("p1", 10, 220, now(g))
+    assert e.value.code == "INSUFFICIENT_FUNDS"
+    end_phase(g)
+    assert g.properties[10].owner_id is None and g.players["p1"].cash == 219
+
+
 def test_replacement_and_cancellation_and_reservations():
-    g = new_game()
-    for pid, tile in (("p1", 1), ("p2", 4)):
-        g.players[pid].position = tile - 1
-    g.players["p3"].position = 8
-    g.players["p4"].position = 8
-    move(g, {"p1": 1, "p2": 1})
-    assert sorted(g.auctions) == [1, 4]
+    g = discover(new_game(), 1, ("p1", "p2"))
     t = now(g)
-    cash = g.players["p3"].cash          # 630 after Supply Drop
-    g.submit_bid("p3", 1, 300, t)
+    g.players["p1"].cash = 300
+    g.submit_bid("p1", 1, 300, t)
+    assert g.available_cash("p1") == 0
     with pytest.raises(GameError):
-        g.submit_bid("p3", 4, cash - 300 + 1, t)       # would overspend jointly
-    g.submit_bid("p3", 4, cash - 300, t)
-    assert g.available_cash("p3") == 0
+        g.submit_bid("p1", 1, 301, t)                  # replacement must also fit
+    assert g.auctions[1].active_bids["p1"] == 300     # failed replacement kept old bid
+    g.submit_bid("p1", 1, 200, t)                      # lowering is fine
+    assert g.available_cash("p1") == 100
+    g.cancel_bid("p1", 1, t)
+    assert g.available_cash("p1") == 300
     with pytest.raises(GameError):
-        g.submit_bid("p3", 1, 301, t)                  # replacement must also fit
-    assert g.auctions[1].active_bids["p3"] == 300     # failed replacement kept old bid
-    g.submit_bid("p3", 1, 200, t)                      # lowering is fine
-    assert g.available_cash("p3") == 100
-    g.cancel_bid("p3", 4, t)
-    assert g.available_cash("p3") == cash - 200
-    with pytest.raises(GameError):
-        g.cancel_bid("p3", 4, t)
+        g.cancel_bid("p1", 1, t)
     g.check_invariants()
 
 
@@ -263,7 +291,7 @@ def test_tie_break_uses_rotating_priority():
         assert g.round_number == rnd_offset + 1
         expected_first = g.slot_order[rnd_offset % 4]
         assert g.player_priority_order[0] == expected_first
-        discover(g, 10, ("p1",))
+        discover(g, 10, tuple(g.slot_order))
         t = now(g)
         for pid in g.slot_order:
             if g.players[pid].cash >= 200:
@@ -282,22 +310,8 @@ def test_no_bids_leaves_property_unowned_and_rediscoverable():
     assert 7 in g.auctions
 
 
-def test_multiple_wins_cannot_overspend():
-    g = new_game()
-    g.players["p1"].position = 0
-    g.players["p2"].position = 3
-    g.players["p3"].position = 8
-    g.players["p4"].position = 8
-    move(g, {"p1": 1, "p2": 1})
-    t = now(g)
-    g.submit_bid("p3", 1, 330, t)
-    g.submit_bid("p3", 4, 300, t)
-    end_phase(g)
-    assert g.players["p3"].cash == 0 and g.players["p3"].owned_property_ids == {1, 4}
-
-
 def test_bid_amounts_are_private():
-    g = discover(new_game(), 1)
+    g = discover(new_game(), 1, ("p1", "p2", "p3"))
     g.submit_bid("p2", 1, 222, now(g))
     assert "222" not in repr(g.public_snapshot(now(g)))
     _, events = g.submit_bid("p3", 1, 333, now(g))
@@ -517,4 +531,4 @@ def test_event_order_lets_clients_render_current_state():
     names = types(settled)
     board_before = max(i for i, t in enumerate(names[:names.index("RoundSettled")]) if t == "BoardUpdated")
     alice = next(p for p in settled[board_before].data["players"] if p["id"] == "p1")
-    assert alice["props"] == [1] and alice["cash"] == 600 - 185
+    assert alice["props"] == [1] and alice["cash"] == 600 - 200

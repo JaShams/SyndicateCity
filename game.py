@@ -126,6 +126,16 @@ class Auction:
     active_bids: dict = field(default_factory=dict)   # player_id -> amount
     closed: bool = False
 
+    @property
+    def contested(self) -> bool:
+        """Two or more landers bid against each other; a single lander just buys."""
+        return len(self.discoverer_ids) > 1
+
+    @property
+    def min_bid(self) -> int:
+        tile = TILES[self.property_id]
+        return tile.min_bid if self.contested else tile.face_value
+
 
 def sanitize_text(text: str) -> str:
     """Strip terminal control characters (escape injection, bidi overrides)."""
@@ -232,6 +242,8 @@ class Game:
             } for p in (self.players[i] for i in self.slot_order)],
             "owners": {str(t): pr.owner_id for t, pr in self.properties.items() if pr.owner_id},
             "auctions": sorted(t for t, a in self.auctions.items() if not a.closed),
+            "landers": {str(t): sorted(a.discoverer_ids)
+                        for t, a in self.auctions.items() if not a.closed},
         }
 
     def private_view(self, pid: str) -> dict:
@@ -358,7 +370,7 @@ class Game:
                 events.append(Event("AuctionOpened", {
                     "round": self.round_number,
                     "auctions": [{"property_id": t, "name": TILES[t].name,
-                                  "min_bid": TILES[t].min_bid,
+                                  "min_bid": a.min_bid, "contested": a.contested,
                                   "discoverers": sorted(a.discoverer_ids)}
                                  for t, a in sorted(self.auctions.items())],
                     "priority": list(self.player_priority_order)}))
@@ -444,13 +456,12 @@ class Game:
                 continue
             winner = min(bids, key=lambda pid: (-bids[pid], priority[pid]))
             amount = bids[winner]
-            discount = board.DISCOVERER_DISCOUNT if winner in a.discoverer_ids else 0
-            paid = max(0, amount - discount)
+            paid = amount
             self.players[winner].cash -= paid
             self._transfer_property(tile_id, winner)
             events.append(Event("AuctionClosed", {
                 "property_id": tile_id, "name": TILES[tile_id].name, "winner": winner,
-                "paid": paid, "discount": discount}))
+                "paid": paid, "contested": a.contested}))
             for pid, bid in bids.items():
                 events.append(Event.private("BidStatus", {
                     "property_id": tile_id, "amount": bid,
@@ -639,10 +650,15 @@ class Game:
         if type(property_id) is not int or property_id not in self.auctions:
             raise GameError("NO_AUCTION", "that property is not being auctioned")
         auction = self.auctions[property_id]
+        name = TILES[property_id].name
+        if pid not in auction.discoverer_ids:
+            raise GameError("NOT_ELIGIBLE", f"only players who landed on {name} can buy it")
         amount = self._require_int(amount, "amount", 0)
-        minimum = TILES[property_id].min_bid
+        minimum = auction.min_bid
+        if not auction.contested and amount != minimum:
+            raise GameError("FIXED_PRICE", f"{name} sells at its listed price of {minimum}")
         if amount < minimum:
-            raise GameError("BID_TOO_LOW", f"minimum bid for {TILES[property_id].name} is {minimum}")
+            raise GameError("BID_TOO_LOW", f"minimum bid for {name} is {minimum}")
         old = auction.active_bids.get(pid, 0)
         available = max(0, self.players[pid].cash - (self.reserved(pid) - old))
         if amount > available:
@@ -681,7 +697,7 @@ class Game:
                 assert self.reserved(pid) <= max(0, p.cash), f"{pid} over-reserved"
         for a in self.auctions.values():
             for pid, amt in a.active_bids.items():
-                assert pid in self.players and amt >= TILES[a.property_id].min_bid
+                assert pid in a.discoverer_ids and amt >= a.min_bid
         assert set(PROPERTY_IDS) == set(self.properties)
 
 

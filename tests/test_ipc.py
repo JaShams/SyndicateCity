@@ -111,7 +111,7 @@ def test_full_short_match_end_to_end(private_bus):
         await c["p2"].request("SubmitBid", {"property_id": 1, "amount": 140})
         closed = await wait_for(c["p3"], "AuctionClosed")
         assert closed["data"] == {"property_id": 1, "name": "Dockyard", "winner": "p1",
-                                  "paid": 135, "discount": 15}
+                                  "paid": 150, "contested": True}
         assert "140" not in str(closed)
         ended = await wait_for(c["p4"], "MatchEnded", timeout=10)
         assert ended["data"]["winners"]
@@ -158,7 +158,7 @@ def test_crash_during_auction_then_rejoin_keeps_bid(private_bus):
         await wait_for(c["p1"], "PhaseChanged", pred=lambda e: e["data"]["phase"] == "NEGOTIATION")
         snap = await fresh.request("GetSnapshot")
         p2 = next(p for p in snap["public"]["players"] if p["id"] == "p2")
-        assert p2["props"] == [1] and p2["cash"] == 600 - 155 and p2["connected"]
+        assert p2["props"] == [1] and p2["cash"] == 600 - 170 and p2["connected"]
         await s.close()
     run(body())
 

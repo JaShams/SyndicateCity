@@ -42,7 +42,7 @@
 @wait 2
 /say Last round. Spend it all.
 @wait 7
-/tell carol You're on your own. ;)
+/tell carol You sold him Purple? Unbelievable.
 @round 4 movement
 /move 3
 @round 4 auction

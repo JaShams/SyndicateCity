@@ -17,10 +17,10 @@
 @wait 2
 /offer carol Dockyard 200
 @round 2 movement
-/move 2
+/move 3
 @round 2 auction
 @wait 3
-/say Nothing for me this round. Saving up.
+/say Midtown? Not for me. Saving up.
 
 @round 3
 @wait 5
@@ -31,17 +31,17 @@
 /move 3
 @round 3 auction
 @wait 1
-/bid Warehouse 210
+/bid Industrial 210
 
 @round 4
 @wait 1
-/tell bob Industrial completes my Purple. 260?
-@accept bob
+/tell carol Warehouse completes my Purple. 260?
+@accept carol
 @wait 1
 /say Purple district complete.
 @round 4 movement
 /move 2
 @round 4 auction
 @wait 2
-/say I'm broke. Go ahead.
+/say Spent. Go ahead.
 @end

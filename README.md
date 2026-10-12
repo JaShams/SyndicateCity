@@ -4,7 +4,7 @@ Syndicate City is a text-based multiplayer property game for 4–6 players. Each
 
 1. Players negotiate and trade properties.
 2. Each player secretly picks how far to move (1–3 tiles).
-3. Unowned properties that someone landed on go to sealed-bid auctions.
+3. A player who is alone on an unowned property may buy it at its listed value. When several players land on the same one, only they can bid for it in a sealed auction.
 
 The game lasts seven rounds, and the highest net worth wins.
 
@@ -120,22 +120,24 @@ Any client can play a script: `scripts/run_client.sh 1 --script my-moves.txt`. A
 * **Round phases:**
   1. **NEGOTIATION (45 s).** Public, private and group chat are open. A property's owner can make a formal offer to sell it for credits; the buyer may accept or reject it. Accepted trades settle immediately and atomically. Unanswered offers expire when the phase ends.
   2. **MOVEMENT (15 s).** Each player privately picks 1, 2 or 3 and may change the choice until the deadline. Anyone who doesn't choose moves 1. All moves are revealed and resolved at the same moment.
-  3. **AUCTION (25 s, only if something was discovered).** Every unowned property that someone landed on goes to a sealed-bid auction.
-  4. **SETTLEMENT.** Auctions close, results are announced, and the next round begins.
+  3. **AUCTION (25 s, only if something was discovered).** Every unowned property that someone landed on goes on sale, but only to the players who landed on it. A single lander may buy it at its face value (`/buy`). Two or more landers bid against each other in a sealed auction (`/bid`).
+  4. **SETTLEMENT.** Purchases and auctions close, results are announced, and the next round begins.
 * **Landing effects:**
   * Landing on another player's property costs its rent. Rent doubles if the owner holds both properties in that district.
   * Rent and Checkpoint charges can push cash below zero. Negative cash is debt, not elimination.
   * Purchases and bids must be covered by **available cash** = `max(0, cash − reserved bids)`.
-* **Auction rules:**
-  * Minimum bid is `ceil(0.8 × value)`.
-  * Each player has at most one bid per property. A new bid replaces the old one, and bids can be cancelled.
-  * The full bid amount is reserved across all auctions, so you can never overspend.
-  * The highest bid wins. A player who landed on the property that round gets **15 credits off**.
+* **Purchase and auction rules:**
+  * Only the players who landed on a property this round can buy it or bid on it.
+  * One lander: the price is fixed at the face value. Not buying leaves the property unowned.
+  * Two or more landers: sealed auction, minimum bid `ceil(0.8 × value)`.
+  * Each player has at most one bid (or purchase) per property. A new bid replaces the old one, and bids can be cancelled.
+  * The full amount is reserved until settlement, so you can never overspend.
+  * The highest bid wins and pays exactly what it bid.
   * Ties go to the rotating priority order: round *r* starts with slot `(r−1) mod N`. The order is announced at the start of each round.
   * Losing bids are never published.
 * **Scoring:** `cash + face value of properties + 80 × completed districts`. Ties are broken by cash, then by property count; if still tied, there are joint winners.
 
-**Sample round:** Bob sells Old Town to Alice for 230, which completes Blue for her. Everyone picks a move in secret. Carol lands on Alice's Dockyard and pays 50 (doubled rent). Dave discovers Tech Park and bids 200. Carol bids 210 and wins it.
+**Sample round:** Bob sells Old Town to Alice for 230, which completes Blue for her. Everyone picks a move in secret. Carol lands on Alice's Dockyard and pays 50 (doubled rent). Dave and Bob both land on Tech Park, so it goes to a sealed auction between them: Dave bids 200, Bob bids 210 and wins it. Carol, alone on Uptown, buys it for its listed 220.
 
 ### Client commands
 
@@ -247,9 +249,9 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 
 | Suite | What it covers |
 |---|---|
-| `tests/test_game.py` | Every rule in §4: wrap and START bonus, special tiles, rent and district doubling, debt, defaults, deadlines, auction minimum, replacement, cancellation, reservation, tie-break rotation, discount, trades (stale, duplicate, atomic), chat limits, scoring and ties. Also **100 randomized 4–6-player matches** checking invariants after every step |
+| `tests/test_game.py` | Every rule in §4: wrap and START bonus, special tiles, rent and district doubling, debt, defaults, deadlines, fixed-price single-lander purchase, lander-only auctions, auction minimum, replacement, cancellation, reservation, tie-break rotation, trades (stale, duplicate, atomic), chat limits, scoring and ties. Also **100 randomized 4–6-player matches** checking invariants after every step |
 | `tests/test_ipc.py` | Real private `dbus-daemon`: join and roster mapping, unknown UID, duplicate session, public/private/group routing, contiguous `pseq`, a full match, private bid status, crash during auction then rejoin with the bid kept, single coordinator name, no `dbus_next` imports outside `ipc.py` |
-| `tests/test_concurrency.py` | 20 concurrent overbids (no overspend), 10 concurrent accepts (settles once), concurrent replay, simultaneous movement, median ack latency < 250 ms |
+| `tests/test_concurrency.py` | 20 concurrent bids, half beyond cash (no overspend), 10 concurrent accepts (settles once), concurrent replay, simultaneous movement, median ack latency < 250 ms |
 | `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor`, cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
 | `tests/test_script_client.py` | `client.py --script`: the parser, then four scripted client processes play a match covering chat, a trade accepted by `@accept`, an outbid and a skipped auction |
 | `tests/test_processes.py` | Scripted players as separate OS processes. Player 2 is killed with SIGKILL mid-auction and restarted; the logs are then checked with `verify_multiuser.py` |
