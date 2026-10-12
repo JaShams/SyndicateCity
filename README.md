@@ -8,7 +8,7 @@ Syndicate City is a text-based multiplayer property game for 4–6 players. Each
 
 The game lasts seven rounds, and the highest net worth wins.
 
-**Players: start with the [Player's Manual](docs/USER_MANUAL.md).** This README covers installation, architecture and testing.
+**Players: start with the [Player's Manual](USER_MANUAL.md).** This README covers installation, architecture and testing.
 
 All communication between processes goes over a **dedicated, isolated D-Bus bus**. The whole communications layer is one file, **`ipc.py`**.
 
@@ -243,24 +243,6 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 
 The pytest integration tests run under a single account. They swap only the UID resolver (a test-only hook) so that several slots can be filled; every other code path, including the policy file, is the production one. The multi-UID script needs no such hook.
 
-### Adversarial testing for classmates
-
-Run against a live game as a **player** account:
-
-```bash
-sudo -u syndicate-p4 /opt/syndicate-city/venv/bin/python /opt/syndicate-city/tests/adversarial_client.py \
-     --bus-address-file /run/syndicate-city/bus.address all
-# or individual probes: coordinator phantom monitor direct eavesdrop identity replay late overbid malformed flood
-```
-
-Each probe prints the expected behaviour, the observed behaviour, the OS concept involved, and PASS/FAIL. You can also attack by hand:
-
-```bash
-sudo -u syndicate-p3 busctl --address="$(sudo cat /run/syndicate-city/bus.address)" \
-     call org.syndicate.City /org/syndicate/City org.syndicate.City1 Request s \
-     '{"v":1,"id":"x1","action":"SubmitBid","payload":{"property_id":10,"amount":999999}}'
-```
-
 ## 9. Packaging
 
 ```bash
@@ -268,7 +250,7 @@ scripts/package.sh            # needs report.pdf in the project root
 scripts/package.sh --draft    # review build without the report
 ```
 
-The script checks that every required file is present, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`. A suggested structure for the report is in `docs/report_outline.md`.
+The script checks that every required file is present, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`.
 
 ## 10. Files
 
