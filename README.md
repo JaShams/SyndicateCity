@@ -261,7 +261,7 @@ scripts/package.sh            # needs report.pdf in the project root
 scripts/package.sh --draft    # review build without the report
 ```
 
-The script checks that every required file is present, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`.
+The archive holds exactly the files git considers part of the project: tracked files plus new files that `.gitignore` does not exclude. To leave something out of the package, add it to `.gitignore`. `report.pdf` is always included when present. The script also checks that the core files are present and not ignored, that only `ipc.py` imports `dbus_next`, and that the sources compile. It then writes `dist/syndicate-city.tgz`.
 
 ## 10. Files
 

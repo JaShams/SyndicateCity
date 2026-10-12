@@ -6,22 +6,25 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 DRAFT=0; [ "${1:-}" = "--draft" ] && DRAFT=1
 
-FILES=(ipc.py server.py client.py game.py board.py README.md requirements.txt requirements-dev.txt
-       config/bus.conf.in config/roster.example.json
-       scripts/common.sh scripts/setup.sh scripts/run_server.sh scripts/run_client.sh
-       scripts/stop.sh scripts/package.sh scripts/run_tests.sh scripts/integration_multiuser.sh
-       scripts/render_bus_conf.py scripts/demo.sh demo/p1.txt demo/p2.txt demo/p3.txt demo/p4.txt
-       tests/conftest.py tests/helpers.py tests/test_game.py tests/test_ipc.py
-       tests/test_concurrency.py tests/test_security.py tests/test_processes.py
-       tests/adversarial_client.py tests/scripted_client.py tests/verify_multiuser.py
-       tests/test_script_client.py
-       docs/report_outline.md docs/USER_MANUAL.md)
+# Package exactly what git considers part of the project: tracked files plus new
+# files that .gitignore does not exclude. Edit .gitignore to change what ships.
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: run from a git checkout" >&2; exit 1; }
+FILES=()
+while IFS= read -r -d '' f; do
+    [ -f "$f" ] && FILES+=("$f")       # skip tracked files deleted in the working tree
+done < <(git ls-files -z --cached --others --exclude-standard | sort -zu)
+has() { printf '%s\n' "${FILES[@]}" | grep -qxF "$1"; }
+
+# Sanity check: these must exist and must not be ignored.
+REQUIRED=(ipc.py server.py client.py game.py board.py README.md USER_MANUAL.md requirements.txt
+          config/bus.conf.in scripts/common.sh scripts/setup.sh scripts/run_server.sh
+          scripts/run_client.sh scripts/stop.sh scripts/render_bus_conf.py)
+for f in "${REQUIRED[@]}"; do has "$f" || { echo "error: missing or ignored: $f" >&2; exit 1; }; done
 if [ -f report.pdf ]; then
-    FILES+=(report.pdf)
+    has report.pdf || FILES+=(report.pdf)      # the report ships even if .gitignore matches it
 elif [ "$DRAFT" -eq 0 ]; then
     echo "error: report.pdf missing (use --draft for a review build)" >&2; exit 1
 fi
-for f in "${FILES[@]}"; do [ -f "$f" ] || { echo "error: missing $f" >&2; exit 1; }; done
 
 # The communications library must be exactly one file and the only D-Bus user.
 if grep -l "dbus_next" server.py client.py game.py board.py >/dev/null 2>&1; then
