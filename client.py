@@ -21,7 +21,8 @@ from game import sanitize_text
 
 HELP = """\
 /help                               this text
-/board                              board, owners, pawns
+/board                              board map: owners, pawns, player legend
+/board list                         board as a table, with minimum bids
 /status                             phase, deadline, your cash/bids/offers
 /players                            all players, cash, properties
 /say <message>                      public chat            (NEGOTIATION/AUCTION)
@@ -40,6 +41,16 @@ TAGS = {"SERVER": "\033[1;36m", "PUBLIC": "\033[0;37m", "GROUP": "\033[0;35m",
         "PRIVATE": "\033[1;35m", "TRADE": "\033[1;33m", "AUCTION": "\033[1;32m",
         "ERROR": "\033[1;31m"}
 RESET = "\033[0m"
+DISTRICT_COLORS = {"Blue": "\033[1;34m", "Green": "\033[1;32m", "Purple": "\033[1;35m",
+                   "Red": "\033[1;31m"}
+
+# /board map: the tiles sit on the rim of a 4x4 grid, clockwise from START at top-left.
+RING = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (1, 3): 4, (2, 3): 5,
+        (3, 3): 6, (3, 2): 7, (3, 1): 8, (3, 0): 9, (2, 0): 10, (1, 0): 11}
+assert sorted(RING.values()) == list(range(board.BOARD_SIZE))
+CELL_W = 14       # inner width of a tile box
+CELL_LINES = 5    # text lines per tile box
+CENTRE_W = 2 * CELL_W + 1
 
 
 def clean(value) -> str:
@@ -98,6 +109,58 @@ class ClientUI:
         self.deadline = time.monotonic() + self.public.get("remaining", 0)
 
     def render_board(self) -> str:
+        owners = self.public.get("owners", {})
+        players = self.public.get("players", [])
+        marks = {p["id"]: str(n) for n, p in enumerate(players, 1)}
+        pawns: dict[int, list[str]] = {}
+        for p in players:
+            pawns.setdefault(p["pos"], []).append(marks[p["id"]])
+        cells = {t.index: self._tile_cell(t, owners.get(str(t.index)), pawns.get(t.index, []))
+                 for t in TILES}
+        centre = self._board_centre(players, marks)
+
+        full = "+" + "+".join(["-" * CELL_W] * 4) + "+"
+        side = "+" + "-" * CELL_W + "+"
+        lines = [full]
+        for row in range(4):
+            for i in range(CELL_LINES):
+                if row in (1, 2):
+                    mid = centre[(row - 1) * (CELL_LINES + 1) + i]
+                    lines.append(f"|{cells[RING[row, 0]][i]}|{mid}|{cells[RING[row, 3]][i]}|")
+                else:
+                    lines.append("|" + "|".join(cells[RING[row, c]][i] for c in range(4)) + "|")
+            lines.append(side + centre[CELL_LINES] + side if row == 1 else full)
+        return "\n".join(lines)
+
+    def _tile_cell(self, t, owner, here: list[str]) -> list[str]:
+        """The CELL_LINES padded lines of one tile box."""
+        text = [f"{t.index} {t.name}"]
+        if t.is_property:
+            text += [f"{t.district} ${t.face_value}", f"rent {t.base_rent}",
+                     f"owner {self.name(owner) if owner else '-'}"]
+        elif t.category == "special":
+            text += [f"{'+' if t.cash_effect > 0 else ''}{t.cash_effect} credits", "", ""]
+        else:
+            text += [f"+{board.START_BONUS} passing", "", ""]
+        text.append("@ " + " ".join(here) if here else "")
+        cell = [(" " + line)[:CELL_W].ljust(CELL_W) for line in text]
+        if self.color and t.is_property:
+            cell[1] = DISTRICT_COLORS.get(t.district, "") + cell[1] + RESET
+        return cell
+
+    def _board_centre(self, players: list, marks: dict) -> list[str]:
+        """Title and player legend shown inside the ring."""
+        phase = self.public.get("phase", "?")
+        rnd = self.public.get("round", 0)
+        text = [" SYNDICATE CITY", f" Round {rnd}  {phase}" if rnd else f" {phase}",
+                " clockwise from START -->", ""]
+        for p in players:
+            flag = " you" if p["id"] == self.me else "" if p["connected"] else " off"
+            text.append(f" {marks[p['id']]} {clean(p['name'])[:12]:<12} {p['cash']:>6}{flag}")
+        size = 2 * CELL_LINES + 1
+        return [line[:CENTRE_W].ljust(CENTRE_W) for line in (text + [""] * size)[:size]]
+
+    def render_board_list(self) -> str:
         owners = self.public.get("owners", {})
         pawns: dict[int, list[str]] = {}
         for p in self.public.get("players", []):
@@ -323,7 +386,7 @@ class ClientUI:
         if cmd == "/help":
             print(HELP)
         elif cmd == "/board":
-            print(self.render_board())
+            print(self.render_board_list() if args[:1] == ["list"] else self.render_board())
         elif cmd == "/status":
             await self.refresh()
             print(self.render_status())

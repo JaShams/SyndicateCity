@@ -159,7 +159,37 @@ Auctions close, winners pay, and everyone sees the updated standings:
 
 ## 4. The board
 
-There are twelve tiles in a loop. Everyone starts on tile 0. Type `/board` to see it, including who owns what and where every pawn stands:
+There are twelve tiles in a loop. Everyone starts on tile 0. Type `/board` to see a map of it. Pawns move clockwise around the ring, starting from START in the top-left corner. Each tile box shows who owns it, and a line like `@ 2 3` marks the pawns standing there. The numbers match the player list in the middle, which also shows everyone's cash and marks you with `you` (and anyone disconnected with `off`):
+
+```
++--------------+--------------+--------------+--------------+
+| 0 START      | 1 Dockyard   | 2 Old Town   | 3 Safehouse  |
+| +50 passing  | Blue $160    | Blue $160    | +30 credits  |
+|              | rent 25      | rent 25      |              |
+|              | owner -      | owner -      |              |
+| @ 1 2 3 4    |              |              |              |
++--------------+--------------+--------------+--------------+
+| 11 Uptown    | SYNDICATE CITY              | 4 Midtown    |
+| Red $220     | Round 1  NEGOTIATION        | Green $180   |
+| rent 40      | clockwise from START -->    | rent 30      |
+| owner -      |                             | owner -      |
+|              | 1 alice           600 you   |              |
++--------------+ 2 bob             600       +--------------+
+| 10 Tech Park | 3 carol           600       | 5 Financial  |
+| Red $220     | 4 dave            600       | Green $180   |
+| rent 40      |                             | rent 30      |
+| owner -      |                             | owner -      |
+|              |                             |              |
++--------------+--------------+--------------+--------------+
+| 9 Supply Drop| 8 Warehouse  | 7 Industrial | 6 Checkpoint |
+| +30 credits  | Purple $200  | Purple $200  | -40 credits  |
+|              | rent 35      | rent 35      |              |
+|              | owner -      | owner -      |              |
+|              |              |              |              |
++--------------+--------------+--------------+--------------+
+```
+
+Long player names are cut short to fit the boxes. `/board list` shows the same board as a table, with full owner names and the minimum bid for each property:
 
 ```
    0 START       +50 when passing   <- alice, bob, carol, dave
@@ -322,7 +352,8 @@ There is no early win. Disconnected players stay in the game and simply move 1 e
 | Command | Phase | What it does |
 |---|---|---|
 | `/help` | any | List commands |
-| `/board` | any | Board, owners, pawn positions |
+| `/board` | any | Board map: owners, pawn positions, player legend |
+| `/board list` | any | Board as a table, including minimum bids |
 | `/status` | any | Round, phase, time left, tie-break order, your cash, reserved and available money, your bids, movement choice and offers |
 | `/players` | any | Everyone's cash, tile and properties |
 | `/offers` | any | Your pending offers |
