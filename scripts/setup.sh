@@ -3,6 +3,7 @@
 # install tree, dedicated-bus config and roster. Idempotent. Needs sudo.
 #
 #   sudo scripts/setup.sh [--players N] [--offline]     # N = 4..6, default 4
+#   sudo scripts/setup.sh --debug-monitor                # also let root run dbus-monitor
 #   sudo scripts/setup.sh --uninstall                    # remove everything we created
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
@@ -10,11 +11,13 @@ source "$(dirname "$0")/common.sh"
 PLAYERS=4
 OFFLINE=0
 UNINSTALL=0
+DEBUG_MONITOR=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --players) PLAYERS="$2"; shift 2 ;;
         --offline) OFFLINE=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
+        --debug-monitor) DEBUG_MONITOR=1; shift ;;
         *) die "unknown option $1" ;;
     esac
 done
@@ -76,6 +79,8 @@ echo "== config $SC_CONF_DIR"
 install -d -o root -g root -m 0755 "$SC_CONF_DIR"
 args=(--socket "$SC_SOCKET" --server-user "$SC_SERVER_USER" --out "$SC_BUS_CONF")
 for u in "${PLAYER_USERS[@]}"; do args+=(--player "$u"); done
+# Debug only: root may watch every message (re-run setup without it to remove).
+[ "$DEBUG_MONITOR" -eq 1 ] && args+=(--debug-monitor)
 "$SC_PYTHON" "$SC_INSTALL_DIR/scripts/render_bus_conf.py" "${args[@]}"
 chmod 0644 "$SC_BUS_CONF"
 {
@@ -99,3 +104,10 @@ for u in "$SC_SERVER_USER" "${PLAYER_USERS[@]}"; do printf '  %-20s uid=%s\n' "$
 echo
 echo "Setup complete. Next: sudo scripts/run_server.sh   then, in 4 terminals: scripts/run_client.sh 1..$PLAYERS"
 echo "Or watch a self-playing match: sudo scripts/demo.sh"
+if [ "$DEBUG_MONITOR" -eq 1 ]; then
+    echo
+    echo "WARNING: --debug-monitor is on. root can read every message on the game bus,"
+    echo "private ones included. Watch with:"
+    echo "  sudo dbus-monitor --address \"\$(sudo cat $SC_ADDRESS_FILE)\""
+    echo "Run setup again without --debug-monitor to remove it; restart the bus to apply."
+fi

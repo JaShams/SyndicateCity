@@ -11,6 +11,7 @@ import asyncio
 import json
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 
 import pytest
 from dbus_next import Message, MessageType
@@ -18,6 +19,7 @@ from dbus_next import Message, MessageType
 import adversarial_client as adv
 import ipc
 from helpers import PrivateBus, Stack, drain, wait_for
+from render_bus_conf import render
 from server import Limits
 
 
@@ -46,6 +48,26 @@ def test_player_cannot_own_coordinator_name(player_only_bus):
 
 def test_player_cannot_become_monitor(player_only_bus):
     assert run(adv.become_monitor(player_only_bus.address)).passed
+
+
+def test_service_account_cannot_become_monitor(private_bus):
+    """Monitoring is denied to everyone, the daemon's own UID included."""
+    assert run(adv.become_monitor(private_bus.address)).passed
+
+
+def test_debug_monitor_policy_only_when_requested():
+    def parse(**kw):
+        root = ET.fromstring(render("/run/x/bus.sock", "svc", ["p1"], **kw))
+        connect = {r.get("user") for r in root.iterfind("policy[@context='default']/allow")
+                   if r.get("user")}
+        monitor = [p.get("user") for p in root.iterfind("policy")
+                   for r in p.iterfind("allow")
+                   if r.get("send_interface") == "org.freedesktop.DBus.Monitoring"]
+        assert not [e for e in root.iter() if e.get("eavesdrop")]
+        return connect, monitor
+
+    assert parse() == ({"svc", "p1"}, [])
+    assert parse(debug_monitor=True) == ({"svc", "p1", "root"}, ["root"])
 
 
 def test_player_cannot_start_server(player_only_bus):

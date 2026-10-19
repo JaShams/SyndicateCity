@@ -2,9 +2,11 @@
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <!--
   Syndicate City dedicated game bus. Rendered by scripts/render_bus_conf.py;
-  do not edit the generated copy. The daemon must run as @SERVER_USER@, which
-  also makes BecomeMonitor (bus-level eavesdropping) unavailable to players:
-  dbus-daemon only grants monitoring to root or the daemon's own UID.
+  do not edit the generated copy. The daemon runs as @SERVER_USER@. Nobody may
+  call the Monitoring interface (BecomeMonitor), not even @SERVER_USER@, and root
+  may not connect at all, so no account can watch other connections' traffic.
+  The one exception: a debug build (the setup.sh debug-monitor option) adds a
+  root-only monitoring policy at the end of this file.
 -->
 <busconfig>
   <type>syndicate-city</type>
@@ -50,6 +52,7 @@
     <!-- ... and only it may emit game events (broadcast or addressed). -->
     <allow send_type="signal" send_interface="org.syndicate.City1" send_member="GameEvent"/>
   </policy>
+@DEBUG_MONITOR@
 
   <!-- Resource limits: small messages, few connections per account. -->
   <limit name="max_message_size">65536</limit>
