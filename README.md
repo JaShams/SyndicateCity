@@ -51,6 +51,15 @@ At runtime, `/run/syndicate-city/` is created with owner `syndicate-server:syndi
 
 The script finishes by printing every account's UID and checking that they are all different.
 
+**Watching bus traffic (debugging only).** `sudo scripts/setup.sh --debug-monitor` renders a bus policy that also lets root connect and call `BecomeMonitor`. Restart the bus (`sudo scripts/stop.sh`, then `run_server.sh`), and watch with:
+
+```bash
+sudo dbus-monitor --address "$(sudo cat /run/syndicate-city/bus.address)"
+sudo dbus-monitor --address "$(sudo cat /run/syndicate-city/bus.address)" "interface='org.syndicate.City1'"
+```
+
+This shows **every** message, private and group data included, so it removes the privacy guarantees in §6 and §7. Never use it for a real game. Running `sudo scripts/setup.sh` again without the flag restores the normal policy.
+
 ## 3. Playing a game
 
 **Terminal 0 (operator):**
@@ -205,7 +214,8 @@ await s.close()
 * **Default deny:** nobody may own names, send method calls, or send signals.
 * **Allowed for everyone:** calls to the bus driver, except the `Monitoring` interface and `UpdateActivationEnvironment`. Calls to `org.syndicate.City` / `org.syndicate.City1.Request` (plus `Introspectable`/`Peer`). Requested replies.
 * **Service user only:** `own="org.syndicate.City"` and sending `org.syndicate.City1.GameEvent` signals.
-* **No `eavesdrop="true"` rule anywhere.** Unicast messages reach only their destination. `BecomeMonitor` is available only to root or the daemon's UID (`syndicate-server`).
+* **No `eavesdrop="true"` rule anywhere.** Unicast messages reach only their destination.
+* **No bus monitoring.** The `Monitoring` interface is denied to every account, `syndicate-server` included, and root is not on the connect list. `dbus-monitor` therefore cannot run against the game bus: as root it cannot connect, and as any allowed account `BecomeMonitor` is refused. It falls back to eavesdropping, which, without an `eavesdrop="true"` rule, shows only messages that account would receive anyway. See §2 for the debug-only exception.
 * **Limits:** 64 KiB messages, 3 connections per user, 32 match rules per connection, plus reply and auth timeouts.
 
 | Communication | Mechanism | Who receives it |
@@ -252,7 +262,7 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 | `tests/test_game.py` | Every rule in §4: wrap and START bonus, special tiles, rent and district doubling, debt, defaults, deadlines, fixed-price single-lander purchase, lander-only auctions, auction minimum, replacement, cancellation, reservation, tie-break rotation, trades (stale, duplicate, atomic), chat limits, scoring and ties. Also **100 randomized 4–6-player matches** checking invariants after every step |
 | `tests/test_ipc.py` | Real private `dbus-daemon`: join and roster mapping, unknown UID, duplicate session, public/private/group routing, contiguous `pseq`, a full match, private bid status, crash during auction then rejoin with the bid kept, single coordinator name, no `dbus_next` imports outside `ipc.py` |
 | `tests/test_concurrency.py` | 20 concurrent bids, half beyond cash (no overspend), 10 concurrent accepts (settles once), concurrent replay, simultaneous movement, median ack latency < 250 ms |
-| `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor`, cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
+| `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor` (nor can the service UID; the root monitor policy appears only with `--debug-monitor`), cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
 | `tests/test_script_client.py` | `client.py --script`: the parser, then four scripted client processes play a match covering chat, a trade accepted by `@accept`, an outbid and a skipped auction |
 | `tests/test_processes.py` | Scripted players as separate OS processes. Player 2 is killed with SIGKILL mid-auction and restarted; the logs are then checked with `verify_multiuser.py` |
 | `scripts/integration_multiuser.sh` | The same checks with **four distinct Linux UIDs** plus the service UID. Adversarial probes run as `syndicate-p4` |
