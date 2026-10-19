@@ -51,12 +51,13 @@ At runtime, `/run/syndicate-city/` is created with owner `syndicate-server:syndi
 
 The script finishes by printing every account's UID and checking that they are all different.
 
-**Watching bus traffic (debugging only).** `sudo scripts/setup.sh --debug-monitor` renders a bus policy that also lets root connect and call `BecomeMonitor`. Restart the bus (`sudo scripts/stop.sh`, then `run_server.sh`), and watch with:
+**Watching bus traffic (debugging only).** `sudo scripts/setup.sh --debug-monitor` renders a bus policy that also lets root connect and call `BecomeMonitor`. Restart the bus (`sudo scripts/stop.sh`), then in a separate terminal run:
 
 ```bash
-sudo dbus-monitor --address "$(sudo cat /run/syndicate-city/bus.address)"
-sudo dbus-monitor --address "$(sudo cat /run/syndicate-city/bus.address)" "interface='org.syndicate.City1'"
+sudo scripts/monitor.sh          # game traffic; --all for everything, other flags go to dbus-monitor
 ```
+
+It waits for the bus, so it can be started before `run_server.sh` or `demo.sh`, and reattaches when the next game starts. It is a wrapper around `sudo dbus-monitor --address unix:path=/run/syndicate-city/bus.sock "interface='org.syndicate.City1'"`.
 
 This shows **every** message, private and group data included, so it removes the privacy guarantees in §6 and §7. Never use it for a real game. Running `sudo scripts/setup.sh` again without the flag restores the normal policy.
 

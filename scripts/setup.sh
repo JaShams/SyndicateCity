@@ -108,6 +108,6 @@ if [ "$DEBUG_MONITOR" -eq 1 ]; then
     echo
     echo "WARNING: --debug-monitor is on. root can read every message on the game bus,"
     echo "private ones included. Watch with:"
-    echo "  sudo dbus-monitor --address \"\$(sudo cat $SC_ADDRESS_FILE)\""
+    echo "  sudo scripts/monitor.sh"
     echo "Run setup again without --debug-monitor to remove it; restart the bus to apply."
 fi
