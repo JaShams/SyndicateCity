@@ -1,5 +1,7 @@
 # Syndicate City
 
+> **Communications library:** [`ipc.py`](ipc.py), at the root of this project (`syndicate-city/ipc.py` in the tarball). It is the single source file that handles all inter-process communication, which runs over D-Bus (a dedicated, isolated bus via `dbus-next`). Its API is documented in section 5 below.
+
 Syndicate City is a text-based multiplayer property game for 4–6 players. Each player is a separate Linux user account. Every round has the same steps:
 
 1. Players negotiate and trade properties.
