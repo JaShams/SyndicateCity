@@ -16,9 +16,9 @@ done < <(git ls-files -z --cached --others --exclude-standard | sort -zu)
 has() { printf '%s\n' "${FILES[@]}" | grep -qxF "$1"; }
 
 # Sanity check: these must exist and must not be ignored.
-REQUIRED=(ipc.py server.py client.py tui.py game.py board.py README.md USER_MANUAL.md requirements.txt
+REQUIRED=(ipc.py cmdlog.py server.py client.py tui.py game.py board.py README.md USER_MANUAL.md requirements.txt
           config/bus.conf.in scripts/common.sh scripts/setup.sh scripts/run_server.sh
-          scripts/run_client.sh scripts/stop.sh scripts/render_bus_conf.py)
+          scripts/run_client.sh scripts/stop.sh scripts/render_bus_conf.py scripts/net_keys.py)
 for f in "${REQUIRED[@]}"; do has "$f" || { echo "error: missing or ignored: $f" >&2; exit 1; }; done
 if [ -f report.pdf ]; then
     has report.pdf || FILES+=(report.pdf)      # the report ships even if .gitignore matches it
@@ -26,11 +26,11 @@ elif [ "$DRAFT" -eq 0 ]; then
     echo "error: report.pdf missing (use --draft for a review build)" >&2; exit 1
 fi
 
-# The communications library must be exactly one file and the only D-Bus user.
-if grep -l "dbus_next" server.py client.py tui.py game.py board.py >/dev/null 2>&1; then
-    echo "error: game modules must not import dbus_next directly" >&2; exit 1
+# The communications library must be exactly one file and the only transport user.
+if grep -lE "dbus_next|websockets" cmdlog.py server.py client.py tui.py game.py board.py >/dev/null 2>&1; then
+    echo "error: game modules must not import dbus_next or websockets directly" >&2; exit 1
 fi
-python3 -m py_compile ipc.py server.py client.py tui.py game.py board.py
+python3 -m py_compile ipc.py cmdlog.py server.py client.py tui.py game.py board.py
 
 mkdir -p dist
 tar --owner=0 --group=0 --transform 's,^,syndicate-city/,' -czf dist/syndicate-city.tgz "${FILES[@]}"

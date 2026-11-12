@@ -1,1 +1,4 @@
 dbus-next==0.2.3
+websockets==15.0.1
+pysyncobj==0.3.14
+cryptography==44.0.0

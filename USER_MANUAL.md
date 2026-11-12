@@ -46,6 +46,15 @@ scripts/run_client.sh 1 --tui
 
 Everything in this manual applies to both views; [§2](#full-screen-mode---tui) shows what is different.
 
+**Playing from another machine.** If the operator runs a network game, they give you two files: your personal **token** (keep it private: anyone with it can play as you) and the server's **certificate**. Then:
+
+```bash
+chmod 600 p1.token
+python3 client.py --server wss://game.example.org:7443 --token-file p1.token --ca-file server.crt
+```
+
+If the operator gives you several addresses (a replicated server), list them all, separated by commas. Should the server you are on fail, your client switches to another one by itself, and the game carries on where it was.
+
 On joining you see your identity and the other players:
 
 ```
@@ -516,6 +525,10 @@ Typing a command the client doesn't know prints `unknown command /foo; try /help
 | `cannot join: no permission to read /run/syndicate-city/bus.address ...` | You are not using a player account | Use `scripts/run_client.sh <n>` or log in as `syndicate-pN` |
 | `cannot join: UNKNOWN_IDENTITY: UID ... is not on the roster` | Your account is not one of this match's players | Ask the operator which account to use |
 | `cannot join: DUPLICATE_SESSION: ...` | Your player is already connected in another terminal | Close the other client first |
+| `cannot join: coordinator refused us: AUTH_FAILED: ...` | Your token is wrong, expired, or for another game | Ask the operator for a new token |
+| `cannot join: ... is readable by other accounts; chmod 600 it` | Your token file is not private | `chmod 600` the token file |
+| `cannot join: ... CERTIFICATE_VERIFY_FAILED ...` | The certificate does not match the server (or you left out `--ca-file`) | Use the operator's `server.crt`, and the host name it was made for |
+| `[ERROR] lost ...; finding a coordinator ...` then `[SERVER] reconnected to coordinator ...` | Network play: the server you were on failed or restarted | Nothing to do: your client reconnected and refreshed the game. A message sent at that exact moment may need resending |
 | `[ERROR] coordinator left the bus; exiting` | The game server stopped (match over, or the operator quit) | — |
 | `[ERROR] missed N public update(s); refreshing` | Your client fell behind briefly | Nothing to do: the client refreshes automatically |
 | `[ERROR] ignored a GameEvent signal from non-coordinator ...` | Someone tried to send a fake game message | Nothing to do: it was ignored. You may want to tell the operator |
@@ -593,6 +606,8 @@ Phase lengths must be a positive, finite number of seconds, at most 3600. The se
 ```
 
 Keep the phase timers long enough for each script's `@wait`s. The scripts in `demo/` assume the timers `scripts/demo.sh` uses: 25 s negotiation, 6 s movement and 12 s auction.
+
+**Network play, crash recovery and replicated servers.** `server.py` can also serve players on other machines (`--listen wss://…`), keep a crash-proof log of the match (`--state-dir`), and run as one of three replicas that take over from each other (`--raft-self`/`--raft-peers`). README §11 has the commands. With `--state-dir`, a server that crashed is simply started again with the same command: it prints `Recovered N commands` and the match continues. In a replicated game, type `start` on the replica that prints `*** … is the LEADER`.
 
 **Afterwards:** `sudo scripts/stop.sh` cleans up anything left running. An audit log of every action, including private bids, is written to `/var/log/syndicate-city/`. Only the server account (and root) can read it.
 

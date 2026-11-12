@@ -2,6 +2,7 @@
 """Syndicate City interactive text client. Run one per Linux player account.
 
     python3 client.py --bus-address-file /run/syndicate-city/bus.address
+    python3 client.py --server wss://game.example.org:7443 --token-file p1.token --ca-file server.crt
 
 Type /help for commands. Lines that do not start with '/' are sent as public chat.
 
@@ -482,6 +483,13 @@ class ClientUI:
             self.out("SERVER", clean(d.get("text", "")))
         elif t == "_ForgedSignalIgnored":
             self.out("ERROR", f"ignored a GameEvent signal from non-coordinator {clean(d['sender'])}")
+        elif t == "_Reconnecting":
+            self.out("ERROR", f"{clean(d['reason'])} ...")
+        elif t == "_Reconnected":
+            if d.get("snapshot"):
+                self.apply_snapshot(d["snapshot"])
+            self.out("SERVER", f"reconnected to coordinator {clean(str(d['server']))}; "
+                               "game state refreshed")
         elif t in ("_CoordinatorLost", "_BusDisconnected"):
             self.out("ERROR", f"{clean(d['reason'])}; exiting")
             self.running = False
@@ -711,23 +719,32 @@ async def run(args) -> int:
             print(f"cannot use script {args.script}: {exc}", file=sys.stderr)
             return 1
     try:
-        address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
-    except PermissionError:
-        print(f"cannot join: no permission to read {args.bus_address_file} "
+        if args.server:
+            token = ipc.read_private_file(args.token_file).decode() if args.token_file else None
+            if not token:
+                print("cannot join: network play needs --token-file", file=sys.stderr)
+                return 1
+            conn = await ipc.GameIPC.connect_client(args.server, token=token,
+                                                    ca_file=args.ca_file)
+        else:
+            address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
+            conn = await ipc.GameIPC.connect_client(address)
+    except PermissionError as exc:
+        print(f"cannot join: no permission to read {exc.filename} "
               "(is this account a roster player in the 'syndicate' group?)", file=sys.stderr)
         return 1
-    except FileNotFoundError:
-        print(f"cannot join: {args.bus_address_file} not found (is the server running?)",
+    except FileNotFoundError as exc:
+        print(f"cannot join: {exc.filename} not found (is the server running?)",
               file=sys.stderr)
         return 1
     except ipc.IPCError as exc:
         print(f"cannot join: {exc}", file=sys.stderr)
         return 1
     try:
-        conn = await ipc.GameIPC.connect_client(address)
         snap = await conn.join(args.name)
     except (ipc.IPCError, ipc.RequestError) as exc:
         print(f"cannot join: {exc}", file=sys.stderr)
+        await conn.close()
         return 1
     interactive = steps is None and sys.stdin.isatty() and sys.stdout.isatty()
     if args.tui and steps is None:
@@ -780,6 +797,11 @@ def main(argv=None) -> int:
                                  epilog=SCRIPT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bus-address", help="dedicated bus address (unix:path=...)")
     ap.add_argument("--bus-address-file", default=ipc.default_bus_address_file())
+    ap.add_argument("--server", metavar="wss://HOST:PORT[,...]",
+                    help="play over the network instead of the local bus; list every "
+                         "coordinator replica, comma-separated, for automatic fail-over")
+    ap.add_argument("--token-file", help="your player token (from scripts/net_keys.py token)")
+    ap.add_argument("--ca-file", help="the coordinator's certificate (server.crt) to trust")
     ap.add_argument("--name", help="display-name suggestion (roster name takes precedence)")
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--tui", action="store_true",
