@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +26,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+import cmdlog
 import ipc
 from game import Event, Game, GameError, GameErrorWithEvents, Phase, Settings
 
@@ -134,14 +137,29 @@ def load_roster(path: str) -> list[tuple[str, int, str]]:
 # ------------------------------------------------------------------ coordinator
 
 class Coordinator:
+    """Authority for one match.
+
+    Every state change is a *command* submitted to a command log (``cmdlog.py``)
+    and applied by :meth:`apply`, which is deterministic: the same commands in
+    the same order always produce the same game, outcomes and events. The log
+    decides durability and replication; this class does not care which one it is.
+    Only read-only work (rate limits, payload validation, snapshots) happens
+    outside the log.
+    """
+
     def __init__(self, game: Game, server: ipc.ServerIPC, audit_path: Optional[str] = None,
                  limits: Optional[Limits] = None, clock: Callable[[], float] = time.monotonic,
-                 echo: Callable[[str], None] = lambda line: print(line, flush=True)):
+                 echo: Callable[[str], None] = lambda line: print(line, flush=True),
+                 log: Optional[cmdlog.MemoryLog] = None, digest: str = ""):
         self.game = game
+        self.digest = digest
         self.ipc = server
-        self.clock = clock
+        self.clock = clock                       # local clock: rate limits only
+        self.gclock = cmdlog.GameClock(clock)    # game time, carried in the log
         self.echo = echo
         self.limits = limits or Limits()
+        self.log = log or cmdlog.MemoryLog()
+        self.log.bind(self.apply)
         self.lock = asyncio.Lock()
         self.dedup: dict[str, OrderedDict] = {pid: OrderedDict() for pid in game.players}
         self.buckets = {pid: TokenBucket(self.limits.rate, self.limits.burst, clock)
@@ -149,6 +167,8 @@ class Coordinator:
         self.chat_buckets = {pid: TokenBucket(self.limits.chat_rate, self.limits.chat_burst, clock)
                              for pid in game.players}
         self.txn = 0
+        self.applied = 0
+        self.replaying = False
         self.started = asyncio.Event()
         self.ended = asyncio.Event()
         self.latencies: list[float] = []
@@ -163,7 +183,7 @@ class Coordinator:
 
     def audit(self, kind: str, **fields) -> int:
         self.txn += 1
-        if self._audit_fd is not None:
+        if self._audit_fd is not None and not self.replaying:
             record = {"txn": self.txn, "ts": time.time(), "mono": round(self.clock(), 4),
                       "kind": kind, **fields}
             os.write(self._audit_fd, (json.dumps(record, default=str) + "\n").encode())
@@ -171,13 +191,15 @@ class Coordinator:
 
     # -- delivery (always after commit) -----------------------------------------
 
-    def emit(self, events: list[Event]) -> None:
+    def emit(self, events: list[Event], deliver: bool = True) -> None:
         rnd = self.game.round_number
         for ev in events:
             if ev.visibility == "public":
-                self.ipc.broadcast(ev.type, ev.data, rnd)
-                self._operator_line(ev)
-            else:
+                if deliver:
+                    self.ipc.broadcast(ev.type, ev.data, rnd)
+                if not self.replaying:
+                    self._operator_line(ev)
+            elif deliver:
                 self.ipc.multicast(ev.recipients, ev.type, ev.data, rnd)
 
     def _operator_line(self, ev: Event) -> None:
@@ -193,6 +215,124 @@ class Coordinator:
             for s in d["scores"]:
                 self.echo(f"  {s['name']:<12} net={s['net_worth']:>5} cash={s['cash']:>5} "
                           f"props={s['properties']} districts={s['districts']}")
+
+    # -- the state machine --------------------------------------------------------
+
+    def apply(self, cmd: dict, deliver: bool = True) -> tuple:
+        """Apply one committed command; return its outcome. Deterministic.
+
+        ``deliver`` is False on replicas that are not serving players and while
+        replaying history, so events change state but are not sent to anyone.
+        """
+        self.applied += 1
+        self.gclock.observe(float(cmd.get("now", 0.0)))
+        now = self.gclock.last                # never earlier than any previous command
+        kind = cmd.get("k")
+        g = self.game
+        events: list[Event] = []
+        try:
+            if kind == "req":
+                return self._apply_request(cmd, now, deliver)
+            if kind == "start":
+                events = g.start_match(now)
+                self.audit("start", players=g.slot_order)
+                outcome = ("ok", {})
+            elif kind == "advance":
+                before = (g.round_number, g.phase)
+                events = g.advance(now)
+                if events:
+                    self.audit("advance", before=[before[0], before[1].value],
+                               after=[g.round_number, g.phase.value],
+                               events=[e.type for e in events])
+                outcome = ("ok", {})
+            elif kind == "disconnect":
+                events = g.mark_disconnected(cmd["pid"])
+                self.audit("disconnect", player=cmd["pid"])
+                outcome = ("ok", {})
+            elif kind == "leader":
+                self.audit("leader", node=cmd.get("node"), digest=cmd.get("digest"))
+                if cmd.get("digest") and self.digest and cmd["digest"] != self.digest \
+                        and not self.replaying:
+                    self.echo(f"WARNING: leader {cmd.get('node')} runs a different roster or "
+                              "settings; replicas will diverge. Fix the configuration.")
+                outcome = ("ok", {})
+            else:
+                outcome = ("err", "BAD_COMMAND", f"unknown command {kind!r}")
+        except GameError as exc:
+            outcome = ("err", exc.code, exc.message)
+            if kind == "start" and not self.replaying:
+                self.echo(f"cannot start: {exc.message}")
+        self.emit(events, deliver)
+        self._track_lifecycle()
+        return outcome
+
+    def _apply_request(self, cmd: dict, now: float, deliver: bool) -> tuple:
+        pid, rid, action, payload = cmd["pid"], cmd["id"], cmd["action"], cmd["payload"]
+        record = action not in UNRECORDED_ACTIONS
+        seen = self.dedup[pid]
+        if record:
+            if rid in seen:
+                fingerprint, outcome = seen[rid]
+                if fingerprint != cmd["fp"]:
+                    return ("err", "ID_REUSED", "request id reused with a different payload")
+                return outcome
+            if len(seen) >= MAX_REQUEST_IDS_PER_PLAYER:
+                return ("err", "ID_LIMIT", "request id budget for this match exhausted")
+        try:
+            result, events = self._dispatch(pid, action, payload, now)
+        except GameErrorWithEvents as exc:
+            outcome = ("err", exc.code, exc.message)
+            self.audit("request", player=pid, id=rid, action=action,
+                       payload=payload, ok=False, error=exc.code)
+            self.emit(exc.events, deliver)
+        except GameError as exc:
+            outcome = ("err", exc.code, exc.message)
+            self.audit("request", player=pid, id=rid, action=action,
+                       payload=payload, ok=False, error=exc.code)
+        else:
+            outcome = ("ok", result)
+            self.audit("request", player=pid, id=rid, action=action,
+                       payload=payload, ok=True, events=[e.type for e in events])
+            self.emit(events, deliver)
+        if record:
+            seen[rid] = (cmd["fp"], outcome)
+        self._track_lifecycle()
+        return outcome
+
+    def _track_lifecycle(self) -> None:
+        if self.game.phase != Phase.LOBBY:
+            self.started.set()
+        if self.game.phase == Phase.ENDED:
+            self.ended.set()
+
+    def replay(self, history: list[dict]) -> None:
+        """Rebuild state from a log's history (synchronously: no request can interleave)."""
+        self.replaying = True
+        try:
+            for cmd in history:
+                self.apply(cmd, deliver=False)
+        finally:
+            self.replaying = False
+        self.gclock.resume()
+        if history:
+            self.audit("recovered", commands=len(history), round=self.game.round_number,
+                       phase=self.game.phase.value, game_time=round(self.gclock.last, 3))
+
+    async def submit(self, cmd: dict) -> tuple:
+        """Stamp a command with the current game time and commit it through the log."""
+        if self.log.kind == "raft":
+            # The log orders and applies; never hold the lock across a network round trip.
+            cmd["now"] = round(self.gclock.now(), 6)
+            return await self.log.submit(cmd)
+        async with self.lock:          # one serialised stamp-persist-apply path
+            cmd["now"] = round(self.gclock.now(), 6)
+            return await self.log.submit(cmd)
+
+    async def forget_stale_sessions(self) -> None:
+        """After a restart or fail-over nobody is connected to *this* process yet."""
+        for pid, p in self.game.players.items():
+            if p.connected and not self.ipc.is_connected(pid):
+                await self.submit({"k": "disconnect", "pid": pid})
 
     # -- requests ----------------------------------------------------------------
 
@@ -212,40 +352,18 @@ class Coordinator:
         if req.action in CHAT_ACTIONS and not self.chat_buckets[pid].take():
             raise ipc.RequestError("RATE_LIMITED", "too many chat messages; slow down")
         validate_payload(req.action, req.payload)
-
-        record = req.action not in UNRECORDED_ACTIONS
-        seen = self.dedup[pid]
-
-        async with self.lock:          # one serialised validate-and-commit path
-            if record:
-                # Checked under the lock so two concurrent copies cannot both run.
-                if req.id in seen:
-                    fingerprint, outcome = seen[req.id]
-                    if fingerprint != req.fingerprint:
-                        raise ipc.RequestError("ID_REUSED",
-                                               "request id reused with a different payload")
-                    return self._replay(outcome)
-                if len(seen) >= MAX_REQUEST_IDS_PER_PLAYER:
-                    raise ipc.RequestError("ID_LIMIT", "request id budget for this match exhausted")
-            now = self.clock()
+        if req.action == "GetSnapshot":          # read-only: served locally, never logged
             try:
-                result, events = self._dispatch(pid, req.action, req.payload, now)
-            except GameErrorWithEvents as exc:
-                outcome = ("err", exc.code, exc.message)
-                self.audit("request", player=pid, id=req.id, action=req.action,
-                           payload=req.payload, ok=False, error=exc.code)
-                self.emit(exc.events)
+                self.game._require_player(pid)
             except GameError as exc:
-                outcome = ("err", exc.code, exc.message)
-                self.audit("request", player=pid, id=req.id, action=req.action,
-                           payload=req.payload, ok=False, error=exc.code)
-            else:
-                outcome = ("ok", result)
-                self.audit("request", player=pid, id=req.id, action=req.action,
-                           payload=req.payload, ok=True, events=[e.type for e in events])
-                self.emit(events)
-            if record:
-                seen[req.id] = (req.fingerprint, outcome)
+                raise ipc.RequestError(exc.code, exc.message) from None
+            return self.game.snapshot_for(pid, self.gclock.now())
+        try:
+            outcome = await self.submit({"k": "req", "pid": pid, "id": req.id,
+                                         "fp": req.fingerprint, "action": req.action,
+                                         "payload": req.payload})
+        except cmdlog.NotLeader as exc:
+            raise ipc.RequestError("NOT_LEADER", str(exc) or "this coordinator is not the leader")
         return self._replay(outcome)
 
     @staticmethod
@@ -259,9 +377,6 @@ class Coordinator:
         if action == "Join":
             events = g.mark_joined(pid)
             return g.snapshot_for(pid, now), events
-        if action == "GetSnapshot":
-            g._require_player(pid)
-            return g.snapshot_for(pid, now), []
         if action == "Leave":
             return {"left": True}, g.mark_disconnected(pid)
         if action == "SendPublic":
@@ -284,43 +399,44 @@ class Coordinator:
             return g.submit_bid(pid, p["property_id"], p["amount"], now)
         if action == "CancelBid":
             return g.cancel_bid(pid, p["property_id"], now)
-        raise ipc.RequestError("UNKNOWN_ACTION", action)
+        raise GameError("UNKNOWN_ACTION", action)
 
     async def handle_disconnect(self, pid: str) -> None:
-        async with self.lock:
-            events = self.game.mark_disconnected(pid)
-            self.audit("disconnect", player=pid)
-            self.emit(events)
+        if not self.log.is_leader:
+            return
+        with contextlib.suppress(cmdlog.NotLeader):
+            await self.submit({"k": "disconnect", "pid": pid})
 
     # -- operator ----------------------------------------------------------------
 
     async def start_match(self) -> bool:
-        async with self.lock:
-            try:
-                events = self.game.start_match(self.clock())
-            except GameError as exc:
-                self.echo(f"cannot start: {exc.message}")
-                return False
-            self.audit("start", players=self.game.slot_order)
-            self.emit(events)
-        self.started.set()
-        return True
+        if not self.log.is_leader:
+            self.echo(f"cannot start: this replica is not the leader ({self.log.status()})")
+            return False
+        try:
+            outcome = await self.submit({"k": "start"})
+        except cmdlog.NotLeader as exc:
+            self.echo(f"cannot start: {exc}")
+            return False
+        return outcome[0] == "ok"
 
     async def run_clock(self) -> None:
-        """Close phases at their server-side deadlines."""
-        await self.started.wait()
-        while self.game.phase != Phase.ENDED:
-            delay = self.game.phase_deadline_monotonic - self.clock()
-            if delay > 0:
-                await asyncio.sleep(min(delay, 1.0))
+        """Close phases at their deadlines (only the replica that orders commands does)."""
+        while True:
+            await self.started.wait()
+            if self.game.phase == Phase.ENDED:
+                break
+            if not self.log.is_leader:
+                await asyncio.sleep(0.2)
                 continue
-            async with self.lock:
-                before = (self.game.round_number, self.game.phase)
-                events = self.game.advance(self.clock())
-                self.audit("advance", before=[before[0], before[1].value],
-                           after=[self.game.round_number, self.game.phase.value],
-                           events=[e.type for e in events])
-                self.emit(events)
+            delay = self.game.phase_deadline_monotonic - self.gclock.now()
+            if delay > 0:
+                await asyncio.sleep(min(delay, 0.5))
+                continue
+            try:
+                await self.submit({"k": "advance"})
+            except cmdlog.NotLeader:
+                await asyncio.sleep(0.2)
         self.ended.set()
 
     async def console_command(self, line: str) -> bool:
@@ -329,9 +445,10 @@ class Coordinator:
         if cmd == "start":
             await self.start_match()
         elif cmd == "status":
-            snap = self.game.public_snapshot(self.clock())
+            snap = self.game.public_snapshot(self.gclock.now())
             self.echo(f"round {snap['round']}/{snap['rounds']} phase {snap['phase']} "
                       f"remaining {snap['remaining']}s auctions {snap['auctions']}")
+            self.echo(f"{self.log.status()}; {self.applied} commands applied")
             if self.latencies:
                 lat = sorted(self.latencies)
                 self.echo(f"request latency ms: p50={lat[len(lat)//2]*1000:.2f} "
@@ -371,6 +488,17 @@ class Coordinator:
 ALLOWED_ACTIONS = frozenset(SCHEMAS)
 
 
+def config_digest(roster, settings: Settings) -> str:
+    """Fingerprint of everything replicas must agree on to stay identical."""
+    blob = json.dumps({"roster": [list(r) for r in roster], "settings": vars(settings)},
+                      sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _split_peers(text: str) -> list[str]:
+    return [p.strip() for p in (text or "").split(",") if p.strip()]
+
+
 async def main_async(args) -> int:
     roster = load_roster(args.roster)
     settings = Settings(rounds=args.rounds, negotiation_seconds=args.negotiation_seconds,
@@ -379,19 +507,89 @@ async def main_async(args) -> int:
     if args.require_players and len(roster) != args.require_players:
         print(f"roster has {len(roster)} players, expected {args.require_players}", file=sys.stderr)
         return 2
-    game = Game(roster, settings, match_id=uuid.uuid4().hex[:8])
-    address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
+    digest = config_digest(roster, settings)
+    clustered = bool(args.raft_self)
+    if clustered and not args.listen:
+        print("fatal: a replicated coordinator serves players over --listen wss://...",
+              file=sys.stderr)
+        return 2
+
+    # -- command log: memory, local file, or Raft ----------------------------------
+    header = {"k": "boot", "v": 1, "match": uuid.uuid4().hex[:8],
+              "roster": [list(r) for r in roster], "settings": vars(settings)}
+    history: list[dict] = []
+    if clustered:
+        try:
+            password = ipc.read_private_file(args.cluster_secret_file).decode()
+            log_ = cmdlog.RaftLog(args.raft_self, _split_peers(args.raft_peers), password,
+                                  state_dir=args.state_dir, node=args.node_id or args.raft_self,
+                                  digest=digest)
+        except (OSError, ValueError, ipc.IPCError, TypeError) as exc:
+            print(f"fatal: cannot start Raft: {exc}", file=sys.stderr)
+            return 1
+        header["match"] = digest[:8]           # every replica must use the same id
+    elif args.state_dir:
+        os.makedirs(args.state_dir, mode=0o700, exist_ok=True)
+        log_ = cmdlog.FileLog(os.path.join(args.state_dir, "commands.jsonl"))
+        try:
+            header, history = log_.open(header)
+        except (OSError, ValueError) as exc:
+            print(f"fatal: {exc}", file=sys.stderr)
+            return 1
+    else:
+        log_ = cmdlog.MemoryLog()
+    game = Game(roster, settings, match_id=header["match"])
+
+    # -- transport ------------------------------------------------------------------
     try:
-        server = await ipc.GameIPC.start_server(
-            address, {uid: pid for pid, uid, _ in roster}, ALLOWED_ACTIONS)
-    except ipc.IPCError as exc:
+        if args.listen:
+            secret = ipc.read_private_file(args.token_secret_file)
+            server = await ipc.GameIPC.start_server(
+                args.listen, {uid: pid for pid, uid, _ in roster}, ALLOWED_ACTIONS,
+                tls_cert=args.tls_cert, tls_key=args.tls_key, token_secret=secret,
+                server_id=args.node_id or None)
+        else:
+            address = args.bus_address or ipc.read_bus_address(args.bus_address_file)
+            server = await ipc.GameIPC.start_server(
+                address, {uid: pid for pid, uid, _ in roster}, ALLOWED_ACTIONS)
+    except (ipc.IPCError, OSError, TypeError) as exc:
         print(f"fatal: {exc}", file=sys.stderr)
         return 1
-    coord = Coordinator(game, server, args.audit_log)
+
+    coord = Coordinator(game, server, args.audit_log, log=log_, digest=digest)
     coord.audit("boot", match=game.match_id, roster=roster, unique_name=server.unique_name,
-                settings=vars(settings))
-    print(f"Syndicate City coordinator {server.unique_name} owns {ipc.BUS_NAME}; "
-          f"match {game.match_id}; {len(roster)} players; {settings.rounds} rounds.")
+                settings=vars(settings), log=log_.kind)
+    coord.replay(history)                     # synchronous: no request can interleave
+    if history:
+        print(f"Recovered {len(history)} commands from {log_.path}: round "
+              f"{game.round_number} phase {game.phase.value}.")
+        await coord.forget_stale_sessions()
+
+    if clustered:
+        coord.gclock.freeze()
+        server.accepting = False
+        server.refusal = "this replica is not the leader"
+
+        async def on_leader():
+            coord.gclock.resume()
+            server.accepting = True
+            coord.echo(f"*** {log_.node} is the LEADER: serving players on {args.listen}")
+            await coord.forget_stale_sessions()
+
+        async def on_follower():
+            coord.gclock.freeze()
+            server.accepting = False
+            coord.echo(f"*** {log_.node} is now a follower: players moved to the new leader")
+            await server.drop_all("leadership moved to another replica")
+
+        log_.on_leader, log_.on_follower = on_leader, on_follower
+        log_._now = coord.gclock.now
+        log_.start()
+
+    where = args.listen or ipc.BUS_NAME
+    print(f"Syndicate City coordinator {server.unique_name} ({server.transport}) on {where}; "
+          f"match {game.match_id}; {len(roster)} players; {settings.rounds} rounds; "
+          f"{log_.status()}.")
     print("Waiting for players. Type 'start' when everyone has joined, 'help' for commands.",
           flush=True)
 
@@ -410,8 +608,9 @@ async def main_async(args) -> int:
     for t in tasks + [ended]:
         t.cancel()
     coord.audit("shutdown")
-    coord.close()
     await server.close()
+    await log_.close()
+    coord.close()
     return 0
 
 
@@ -430,6 +629,21 @@ def parse_args(argv=None):
     ap.add_argument("--linger", type=float, default=30.0,
                     help="seconds to keep serving after the match ends")
     ap.add_argument("--verbose", action="store_true")
+    net = ap.add_argument_group("network play (instead of the D-Bus bus)")
+    net.add_argument("--listen", metavar="wss://HOST:PORT",
+                     help="serve players over WebSocket+TLS on this address")
+    net.add_argument("--tls-cert", help="TLS certificate (PEM), e.g. from scripts/net_keys.py")
+    net.add_argument("--tls-key", help="TLS private key (PEM, mode 0600)")
+    net.add_argument("--token-secret-file", help="HMAC secret that signs player tokens (0600)")
+    dur = ap.add_argument_group("durability and replication")
+    dur.add_argument("--state-dir", help="keep the command log here: survives a crash. With "
+                                         "--raft-self, holds this replica's Raft journal")
+    dur.add_argument("--raft-self", metavar="HOST:PORT",
+                     help="run as one replica of a Raft cluster; address peers reach us on")
+    dur.add_argument("--raft-peers", metavar="HOST:PORT,...", default="",
+                     help="the other replicas' --raft-self addresses")
+    dur.add_argument("--cluster-secret-file", help="shared password for Raft traffic (0600)")
+    dur.add_argument("--node-id", help="name for this replica in logs (default: --raft-self)")
     return ap.parse_args(argv)
 
 

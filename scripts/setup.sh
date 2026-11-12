@@ -59,7 +59,7 @@ done
 
 echo "== install tree $SC_INSTALL_DIR"
 install -d -o root -g root -m 0755 "$SC_INSTALL_DIR" "$SC_INSTALL_DIR/tests" "$SC_INSTALL_DIR/scripts" "$SC_INSTALL_DIR/config" "$SC_INSTALL_DIR/demo"
-install -o root -g root -m 0644 "$SC_SRC_DIR"/{ipc,server,client,tui,game,board}.py "$SC_SRC_DIR/requirements.txt" "$SC_INSTALL_DIR/"
+install -o root -g root -m 0644 "$SC_SRC_DIR"/{ipc,cmdlog,server,client,tui,game,board}.py "$SC_SRC_DIR/requirements.txt" "$SC_INSTALL_DIR/"
 install -o root -g root -m 0644 "$SC_SRC_DIR"/tests/*.py "$SC_INSTALL_DIR/tests/"
 install -o root -g root -m 0755 "$SC_SRC_DIR"/scripts/*.py "$SC_INSTALL_DIR/scripts/"
 install -o root -g root -m 0644 "$SC_SRC_DIR/config/bus.conf.in" "$SC_INSTALL_DIR/config/"
@@ -67,9 +67,9 @@ install -o root -g root -m 0644 "$SC_SRC_DIR"/demo/*.txt "$SC_INSTALL_DIR/demo/"
 if [ ! -x "$SC_PYTHON" ]; then
     python3 -m venv "$SC_INSTALL_DIR/venv" || die "python3 -m venv failed: apt install python3-venv"
 fi
-if ! "$SC_PYTHON" -c "import dbus_next" 2>/dev/null; then
+if ! "$SC_PYTHON" -c "import dbus_next, websockets, pysyncobj, cryptography" 2>/dev/null; then
     if [ "$OFFLINE" -eq 1 ]; then
-        die "dbus-next not installed and --offline given"
+        die "dependencies (requirements.txt) not installed and --offline given"
     fi
     "$SC_INSTALL_DIR/venv/bin/pip" install --quiet -r "$SC_SRC_DIR/requirements.txt"
 fi

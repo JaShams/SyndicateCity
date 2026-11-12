@@ -135,3 +135,56 @@ async def wait_for(client: ipc.ClientIPC, etype: str, timeout: float = 5.0, pred
         ev = await client.next_event(max(0.01, end - loop.time()))
         if ev["type"] == etype and (pred is None or pred(ev)):
             return ev
+
+
+# ------------------------------------------------------------ network stack
+
+class NetKeys:
+    """Certificate, token secret and cluster secret in a temp directory."""
+
+    def __init__(self, directory: str):
+        import net_keys
+        self.dir = directory
+        net_keys.init(directory, ["127.0.0.1", "localhost"])
+        self.cert = os.path.join(directory, "server.crt")
+        self.key = os.path.join(directory, "server.key")
+        self.secret = ipc.read_private_file(os.path.join(directory, "token.secret"))
+        self.cluster_secret = ipc.read_private_file(os.path.join(directory, "cluster.secret"))
+
+    def token(self, pid: str, ttl: float = 3600) -> str:
+        return ipc.mint_token(self.secret, pid, ttl)
+
+
+class NetStack(Stack):
+    """Like :class:`Stack` but over wss:// with real token identity (no test hooks)."""
+
+    def __init__(self, keys: NetKeys):
+        super().__init__(bus=None)
+        self.keys = keys
+        self.address = None
+
+    async def start(self, n=4, rounds=7, neg=30.0, mov=30.0, auc=30.0, limits=None,
+                    audit_path=None, port=0, log=None, history=()):
+        roster = [(f"p{i+1}", 50000 + i, NAMES[i]) for i in range(n)]
+        self.roster = roster
+        self.settings = Settings(rounds=rounds, negotiation_seconds=neg,
+                                 movement_seconds=mov, auction_seconds=auc)
+        game = Game(roster, self.settings)
+        self.server = await ipc.GameIPC.start_server(
+            f"wss://127.0.0.1:{port}", {uid: pid for pid, uid, _ in roster}, ALLOWED_ACTIONS,
+            tls_cert=self.keys.cert, tls_key=self.keys.key, token_secret=self.keys.secret)
+        self.address = f"wss://127.0.0.1:{self.server.port}"
+        self.coord = Coordinator(game, self.server, audit_path, limits=limits or Limits(),
+                                 echo=self.lines.append, log=log)
+        self.coord.replay(list(history))
+        await self.coord.forget_stale_sessions()
+        self.clock_task = asyncio.ensure_future(self.coord.run_clock())
+        return self
+
+    async def connect(self, pid: str, join=True, address=None) -> ipc.ClientIPC:
+        c = await ipc.GameIPC.connect_client(address or self.address, token=self.keys.token(pid),
+                                             ca_file=self.keys.cert, reconnect_window=10)
+        if join:
+            await c.join()
+        self.clients[pid] = c
+        return c

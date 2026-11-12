@@ -1,6 +1,8 @@
 # Syndicate City
 
-> **Communications library:** [`ipc.py`](ipc.py), at the root of this project (`syndicate-city/ipc.py` in the tarball). It is the single source file that handles all inter-process communication, which runs over D-Bus (a dedicated, isolated bus via `dbus-next`). Its API is documented in section 5 below.
+> **Communications library:** [`ipc.py`](ipc.py), at the root of this project (`syndicate-city/ipc.py` in the tarball). It is the single source file that handles all inter-process communication: over D-Bus (a dedicated, isolated bus via `dbus-next`) on one machine, or over WebSocket + TLS (`websockets`) for players on other machines. Its API is documented in section 5 below.
+
+> **Distributed mode** (§11): play across machines, survive a coordinator crash with an on-disk command log, or run three coordinator replicas kept identical by Raft, with automatic fail-over.
 
 Syndicate City is a text-based multiplayer property game for 4–6 players. Each player is a separate Linux user account. Every round has the same steps:
 
@@ -164,7 +166,7 @@ Properties can be given by tile number or name (`10`, `techpark`, `tech park`). 
 
 ## 5. Communications library: `ipc.py`
 
-`ipc.py` is the only module that imports `dbus_next`; a test enforces this. It contains no game rules.
+`ipc.py` is the only module that imports `dbus_next` or `websockets`; a test enforces this. It contains no game rules. The address chooses the transport: `unix:path=…` is the dedicated D-Bus bus described here; `wss://host:port` is the network transport of §11, with the same envelopes, the same API and the same request pipeline.
 
 ```python
 import ipc
@@ -206,7 +208,7 @@ await s.close()
 * JSON inside a D-Bus string trades D-Bus-level typing for schema validation in the application.
 * Event `seq` provides ordering, not durability or integrity.
 * Clients and the server are not authenticated cryptographically; trust rests on the bus daemon's `EXTERNAL` (SO_PEERCRED) authentication.
-* The coordinator's in-memory state is lost if it crashes.
+* Without `--state-dir`, the coordinator's in-memory state is lost if it crashes. With it, a restarted coordinator replays its command log and carries on (§11.2).
 
 ## 6. D-Bus architecture and policy
 
@@ -267,6 +269,9 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 | `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor` (nor can the service UID; the root monitor policy appears only with `--debug-monitor`), cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
 | `tests/test_script_client.py` | `client.py --script`: the parser, then four scripted client processes play a match covering chat, a trade accepted by `@accept`, an outbid and a skipped auction |
 | `tests/test_processes.py` | Scripted players as separate OS processes. Player 2 is killed with SIGKILL mid-auction and restarted; the logs are then checked with `verify_multiuser.py` |
+| `tests/test_net.py` | The `wss://` transport: token signing and tampering, wrong-secret/expired/off-roster tokens, mandatory and verified TLS, hello-before-anything, junk frames, public/private/group routing, private bid status, a full match, reconnect and re-join after every socket drops |
+| `tests/test_durability.py` | Replaying the file log rebuilds an identical game *and* idempotency ledger; a torn final record is discarded; a log for another roster is refused; the game clock freezes and resumes |
+| `tests/test_cluster.py` | Real `server.py` processes. One with `--state-dir` is SIGKILLed mid-auction and restarted: players reconnect on their own and the bid stands. A 3-replica Raft cluster loses its leader to SIGKILL mid-auction: players fail over, the bid stands, the replicated ledger answers a retried request and refuses a reused id, the match finishes, and the surviving follower printed the same result. Raw bytes thrown at a Raft port are ignored |
 | `scripts/integration_multiuser.sh` | The same checks with **four distinct Linux UIDs** plus the service UID. Adversarial probes run as `syndicate-p4` |
 
 The pytest integration tests run under a single account. They swap only the UID resolver (a test-only hook) so that several slots can be filled; every other code path, including the policy file, is the production one. The multi-UID script needs no such hook.
@@ -285,7 +290,115 @@ The archive holds exactly the files git considers part of the project: tracked f
 ```
 ipc.py        communications library (single file)      game.py    pure rules engine + invariants
 server.py     coordinator: auth binding, lock, clock     board.py   tile table
-client.py     interactive terminal client                config/    bus policy template, roster example
-scripts/      setup, run, stop, demo, tests, package     tests/     unit/integration/security/adversarial
+cmdlog.py     command logs: memory, file, Raft           config/    bus policy template, roster example
+client.py     interactive terminal client                tests/     unit/integration/security/adversarial
+scripts/      setup, run, stop, demo, tests, package, net_keys.py (TLS certificate and tokens)
 demo/         p1-p4.txt: scripted players for scripts/demo.sh
 ```
+
+## 11. Distributed mode
+
+Three independent layers, each switched on by flags:
+
+| Layer | Flag | What it adds |
+|---|---|---|
+| Transport | `--listen wss://HOST:PORT` | Players on other machines, over WebSocket + TLS, identified by signed tokens |
+| Durability | `--state-dir DIR` | Every state change is written to an append-only log (fsync) before it takes effect. A restarted coordinator replays it and continues mid-round |
+| Replication | `--raft-self` / `--raft-peers` | Three (or five) coordinators hold the same log via Raft. If the leader dies, another takes over and players fail over automatically |
+
+```
+ laptop A  client.py ─┐                                 ┌─ node1 server.py (leader) ─┐
+ laptop B  client.py ─┼── wss:// TLS + token ──────────►│  node2 server.py           ├─ Raft over TCP,
+ laptop C  client.py ─┤   (listing all 3 replicas;      │  node3 server.py           │  encrypted with the
+ laptop D  client.py ─┘    fail over to the next)       └────────────────────────────┘  cluster secret
+```
+
+Without any of these flags the game is exactly the single-machine D-Bus game of §1–§10.
+
+### 11.1 Network play
+
+```bash
+# on the coordinator machine: key material (once)
+python3 scripts/net_keys.py init --dir keys --host game.example.org     # --host per name/IP players use
+for p in p1 p2 p3 p4; do python3 scripts/net_keys.py token --dir keys --player $p --hours 12; done
+
+python3 server.py --roster config/roster.json --listen wss://0.0.0.0:7443 \
+    --tls-cert keys/server.crt --tls-key keys/server.key --token-secret-file keys/token.secret
+
+# on each player's machine: their token file (private!) and the public certificate
+python3 client.py --server wss://game.example.org:7443 --token-file p1.token --ca-file server.crt
+```
+
+* **Identity.** A token is `base64(claims).base64(HMAC-SHA256(secret, claims))`, with claims `{"p": "<slot>", "e": <expiry>}`. The coordinator verifies the signature (constant-time) and the expiry on the first frame, then binds the connection to that slot on `Join`, exactly like the D-Bus `unique name ↔ slot` binding. Tokens are bearer credentials: whoever holds one plays that slot until it expires. The client refuses a token file that other accounts can read.
+* **TLS** is mandatory (`ws://` is refused) and the client verifies the certificate *and* host name against `--ca-file`. `net_keys.py` makes one self-signed certificate listing every `--host`, so a single file verifies all replicas.
+* **Roster.** In network mode the roster's `uid` values are only labels; use `{"id": "p1", "uid": 1, "name": "alice"}` entries if the player accounts don't exist on the coordinator.
+* **Frames** (one WebSocket per player): `hello{token}` → `welcome{server, name}` or `refused{code}`; then `req{c, body}` → `resp{c, body}` and `event{scope, body}`. `body` is byte-for-byte the D-Bus envelope, so parsing, limits and the coordinator are shared. `scope: private` frames are written only to the addressed player's socket, the counterpart of a D-Bus destination header.
+* **Bounds.** Hello within 5 s; request frames ≤ 4096 B + framing; 32 requests in flight per connection; 1000 queued events per connection (then dropped, and the client's `pseq` gap check triggers a refresh); WebSocket pings every 5 s detect dead peers.
+
+### 11.2 Surviving a coordinator crash
+
+```bash
+python3 server.py ... --state-dir /var/lib/syndicate-city        # works with D-Bus or --listen
+```
+
+Kill it however you like (`kill -9`, power loss) and start the same command again. It prints `Recovered N commands … round R phase P`, network clients reconnect on their own (`[ERROR] … finding a coordinator` then `[SERVER] reconnected …`), and the match resumes with every bid, offer, trade and request id intact. D-Bus clients see the coordinator leave and must be restarted (they then rejoin as usual).
+
+How it works:
+
+* **Commands.** The coordinator never changes the game directly. A player request, a disconnect, the operator's `start` and a phase deadline each become a *command*, a small JSON object stamped with the game time `now`. `Coordinator.apply(cmd)` is the only code that mutates state.
+* **Determinism.** `game.py` has no randomness, never reads a clock and never iterates over hash-ordered sets, so the same commands in the same order rebuild the same state. The idempotency ledger is rebuilt the same way, which is what lets a client safely retry after a crash.
+* **Write-ahead.** `FileLog` appends the command and `fsync`s it before applying it, so nothing a player was told about can be lost. A torn last line (a crash mid-write) is discarded on recovery: that command never took effect and its sender never got a reply. The log's first line names the match, roster and settings, and a log for a different roster or settings is refused.
+* **Game clock.** Phase deadlines use *game time*, which each command carries. A restarted coordinator continues from the last committed value, so time stands still while no coordinator runs: an auction with 6 s left still has 6 s left after the restart.
+* **Read-only work** (rate limits, payload validation, `GetSnapshot`) stays outside the log.
+
+### 11.3 Replicated coordinators (Raft)
+
+```bash
+python3 scripts/net_keys.py init --dir keys --host 10.0.0.1 --host 10.0.0.2 --host 10.0.0.3
+# copy keys/ to all three machines, then on each (shown for node1):
+python3 server.py --roster config/roster.json --listen wss://10.0.0.1:7443 \
+    --tls-cert keys/server.crt --tls-key keys/server.key --token-secret-file keys/token.secret \
+    --raft-self 10.0.0.1:7600 --raft-peers 10.0.0.2:7600,10.0.0.3:7600 \
+    --cluster-secret-file keys/cluster.secret --state-dir state --node-id node1
+
+# players list every replica
+python3 client.py --server wss://10.0.0.1:7443,wss://10.0.0.2:7443,wss://10.0.0.3:7443 \
+    --token-file p1.token --ca-file server.crt
+```
+
+Every node has its own console. One prints `*** node1 is the LEADER`; type `start` there (the others answer `cannot start: this replica is not the leader`). `status` on any node shows its Raft role, term, commit index and how many commands it has applied.
+
+What happens:
+
+1. pysyncobj elects a leader. Each replica keeps the same ordered list of commands and applies new entries, in order, on its own event loop; the Raft thread never touches the game.
+2. The new leader appends a `leader` barrier command and waits until it has applied it. Raft commits in order, so by then it has applied everything from earlier terms. Only then does it resume the game clock and accept players. Followers refuse connections with `NOT_LEADER`.
+3. A player request becomes a command that commits once a majority of replicas has stored it; then every replica applies it and the leader replies and sends the events.
+4. If the leader dies, a follower wins the next election (about 1–2 s), passes its barrier and starts serving. Clients cycle through their address list, reconnect with the same token, re-`Join`, and receive a fresh snapshot. A request caught in the fail-over is re-sent with the *same* request id; the replicated idempotency ledger guarantees it takes effect once.
+5. A leader cut off from the majority steps down after 1.2 s (`leaderFallbackTimeout`) and disconnects its players, who move to the side that still has a majority. Commands on the minority side can never commit.
+6. Each `leader` command carries a fingerprint of the roster and settings; a replica configured differently prints a warning instead of silently diverging.
+
+Three replicas tolerate one failure; five tolerate two. A replica that restarts with its `--state-dir` reloads its Raft journal and catches up from the leader.
+
+**Cluster security.** pysyncobj pickles the messages it exchanges, and unpickling attacker-supplied bytes runs code. A cluster secret is therefore **mandatory**: pysyncobj then seals every message with Fernet (AES + HMAC) and drops anything not sealed with the shared key *before* unpickling it. Treat `cluster.secret`, `token.secret` and `server.key` like passwords (`net_keys.py` writes them 0600), and firewall the Raft port to the other replicas.
+
+### 11.4 What changes in the security model
+
+| Concern | D-Bus (§6–§7) | Network / replicated (§11) |
+|---|---|---|
+| Who a caller is | UID from the bus daemon (SO_PEERCRED) | HMAC token naming a slot; TLS hides it in transit |
+| Who may connect | `<allow user=…>` in the bus policy | Anyone who reaches the port; only valid tokens get past `hello` |
+| Coordinator authenticity | Bus name owner + sender checks | TLS certificate pinned with `--ca-file` |
+| Private delivery | Daemon routes by destination header | Coordinator writes `private` frames only to the addressed socket |
+| Confidentiality on the wire | Local socket | TLS 1.2+ (players), Fernet (between replicas) |
+| Crash | State lost | Recovered from the file log or from the other replicas |
+
+### 11.5 Limitations
+
+* **Latency.** A Raft-committed action takes tens of milliseconds (about 85 ms on one host with pysyncobj's 50 ms append period), against well under 1 ms on the local bus.
+* **Events in flight during a fail-over can be lost** (including a chat message that committed just before the leader died). Game state is never lost: clients re-sync from the snapshot sent on reconnect. Chat history is not part of the snapshot.
+* **Event numbers restart** with each new leader; clients reset their `pseq` gap check on reconnect.
+* **`GetSnapshot` is served locally** by the leader without a Raft round, so a deposed leader can return slightly stale data for up to `leaderFallbackTimeout`.
+* **Game time freezes** while there is no leader (one election, normally 1–2 s), so phases get slightly longer, never shorter.
+* **Tokens are bearer credentials** and cannot be revoked before they expire, short of changing `token.secret` (which invalidates all of them).
+* The replicas trust each other completely: anyone holding the cluster secret can write commands.
+

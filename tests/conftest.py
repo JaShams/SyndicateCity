@@ -20,3 +20,11 @@ def private_bus():
     yield bus
     bus.stop()
     shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def net_keys():
+    from helpers import NetKeys
+    d = tempfile.mkdtemp(prefix="syndicate-net-")
+    yield NetKeys(d)
+    shutil.rmtree(d, ignore_errors=True)
