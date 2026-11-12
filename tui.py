@@ -28,7 +28,7 @@ from typing import Optional
 import board
 import ipc
 from board import DISTRICTS, TILES
-from client import ClientUI, clean
+from client import ClientUI, clean, linked_note, trade_side
 
 PHASE_INFO = {
     "LOBBY": ("waiting for the operator to start", "dim"),
@@ -39,9 +39,9 @@ PHASE_INFO = {
     "ENDED": ("match over", "ERROR"),
 }
 CHAT_TAGS = ("PUBLIC", "PRIVATE", "GROUP")
-COMMANDS = ("/say", "/tell", "/group", "/offer", "/accept", "/reject", "/canceloffer", "/offers",
-            "/move", "/buy", "/bid", "/cancelbid", "/board", "/status", "/players", "/help", "/clear",
-            "/quit")
+COMMANDS = ("/say", "/tell", "/group", "/offer", "/trade", "/accept", "/reject", "/canceloffer",
+            "/offers", "/move", "/buy", "/bid", "/cancelbid", "/ready", "/unready", "/board",
+            "/status", "/players", "/help", "/clear", "/quit")
 
 HELP_LINES = """\
 KEYS
@@ -51,6 +51,7 @@ KEYS
   PgUp / PgDn   scroll the log (End jumps back to the latest)
   1  2  3       choose your move during MOVEMENT (input empty)
   F1            this help          Esc   close a window / clear input
+  F2            ready / not ready (end the phase early once everyone is)
   Ctrl-C        leave the game
 
 CHAT  (NEGOTIATION and AUCTION)
@@ -58,10 +59,18 @@ CHAT  (NEGOTIATION and AUCTION)
   /tell bob hi              private message              /t
   /group bob,carol hi       message a few players
 
-TRADING  (NEGOTIATION)
-  /offer bob oldtown 230    offer one of your properties
+TRADING  (NEGOTIATION, skipped while nobody owns a property)
+  /offer bob oldtown 230    sell one of your properties for credits
+  /trade bob give oldtown,$50 get techpark
+                            any mix of properties and $credits
+  /trade carol give dockyard get $120 link o3
+                            linked to your offer o3: all go through or none do
   /accept o3   /reject o3   answer an offer to you       /a /r
   /canceloffer o3           withdraw your own offer
+
+READY  (any timed phase)
+  /ready                    you are done; the phase ends early once
+                            everyone connected is ready  /done   (/unready)
 
 MOVING  (MOVEMENT)
   press 1, 2 or 3           secret, can be changed until the deadline
@@ -243,7 +252,7 @@ class TuiUI(ClientUI):
             return
         if t == "PhaseChanged":
             self.phase_total = float(d["remaining"])
-        elif t == "TradeOffered" and d.get("buyer") == self.me and d.get("status") == "PENDING":
+        elif t == "TradeOffered" and d.get("to") == self.me and d.get("status") == "PENDING":
             self.alert()
         elif t == "ChatMessage" and d["scope"] != "public" and d["from"] != self.me:
             self.alert()
@@ -344,6 +353,8 @@ class TuiUI(ClientUI):
             self.buf, self.cur = "", 0
         elif key == curses.KEY_F1:
             self.open_overlay("Help", HELP_LINES)
+        elif key == curses.KEY_F2:
+            self.submit("/unready" if self.me in (self.public.get("ready") or []) else "/ready")
         elif key in (curses.KEY_BACKSPACE, "\x7f", "\x08"):
             if self.cur:
                 self.buf = self.buf[:self.cur - 1] + self.buf[self.cur:]
@@ -414,6 +425,10 @@ class TuiUI(ClientUI):
                 return [f"{head},{n}" for n in others if n.lower().startswith(prefix.lower())]
         elif cmd == "/offer":
             pool = others if len(words) == 1 else mine if len(words) == 2 else []
+        elif cmd == "/trade":
+            pool = others if len(words) == 1 else (
+                list(self.offers) if words[-1].lower() == "link"
+                else ["give", "get", "link"] + [keyname(i) for i in board.PROPERTY_IDS])
         elif cmd in ("/accept", "/reject", "/canceloffer"):
             pool = list(self.offers)
         elif cmd in ("/buy", "/bid", "/cancelbid") and len(words) == 1:
@@ -703,20 +718,26 @@ class TuiUI(ClientUI):
                              curses.A_DIM if self.movement else a["warn"]))
                 rows.append(line)
 
-        incoming = [o for o in self.offers.values() if o["buyer"] == self.me]
-        outgoing = [o for o in self.offers.values() if o["seller"] == self.me]
+        incoming = [o for o in self.offers.values() if o["to"] == self.me]
+        outgoing = [o for o in self.offers.values() if o["from"] == self.me]
         if incoming or outgoing:
             head("OFFERS")
             for o in incoming:
-                rows.append([(f"{o['offer_id']} ", a["TRADE"]),
-                             (self.name(o["seller"]), self.pattr(o["seller"])),
-                             (f" sells you {TILES[o['property_id']].name} for ", 0),
-                             (f"{o['price']}", curses.A_BOLD)])
+                link = f" +{o['linked']} linked" if o.get("linked") else ""
+                agreed = " agreed" if o["status"] == "AGREED" else ""
+                rows.append([(f"{clean(o['offer_id'])} ", a["TRADE"]),
+                             (self.name(o["from"]), self.pattr(o["from"])),
+                             (f" gives {trade_side(o['give'])}", 0),
+                             (f" for your {trade_side(o['get'])}", curses.A_BOLD),
+                             (link + agreed, curses.A_DIM)])
             for o in outgoing:
-                rows.append([(f"{o['offer_id']} ", curses.A_DIM),
+                link = f" +{o['linked']} linked" if o.get("linked") else ""
+                agreed = " agreed" if o["status"] == "AGREED" else ""
+                rows.append([(f"{clean(o['offer_id'])} ", curses.A_DIM),
                              (f"you {self.g['arrow']} ", curses.A_DIM),
-                             (self.name(o["buyer"]), self.pattr(o["buyer"])),
-                             (f"  {TILES[o['property_id']].name} {o['price']}", curses.A_DIM)])
+                             (self.name(o["to"]), self.pattr(o["to"])),
+                             (f"  {trade_side(o['give'])} for {trade_side(o['get'])}"
+                              f"{link}{agreed}", curses.A_DIM)])
 
         auctions = self.public.get("auctions") or []
         if auctions and self.public.get("phase") in ("AUCTION", "SETTLEMENT"):
@@ -734,12 +755,15 @@ class TuiUI(ClientUI):
         if players:
             head("PLAYERS", "      cash  worth ")       # aligned over the columns below
             prio = self.public.get("priority", [])
+            ready = set(self.public.get("ready") or [])
             for n, p in enumerate(players, 1):
                 attr = self.pattr(p["id"])
                 if not p["connected"]:
                     attr = curses.A_DIM
                 name = fit(clean(p["name"]), 10)
                 tag = " you" if p["id"] == self.me else "" if p["connected"] else " off"
+                if p["id"] in ready:
+                    tag += " ready"
                 props = f"{self.g['own']}{len(p['props'])}" if p["props"] else ""
                 rows.append([(f"{n}", attr | curses.A_REVERSE), (" ", 0),
                              (f"{name:<10}", attr),
@@ -847,16 +871,22 @@ class TuiUI(ClientUI):
         phase = self.public.get("phase")
         if self.lost:
             return f"Disconnected: {self.lost}. Press Enter to exit.", a["bad"]
-        incoming = [o for o in self.offers.values() if o["buyer"] == self.me]
+        incoming = [o for o in self.offers.values()
+                    if o["to"] == self.me and o["status"] == "PENDING"]
         if incoming and phase == "NEGOTIATION":
             o = incoming[-1]
-            return (f"{self.name(o['seller'])} offers you {TILES[o['property_id']].name} for "
-                    f"{o['price']}:  /accept {o['offer_id']}  or  /reject {o['offer_id']}",
+            oid = clean(o["offer_id"])
+            return (f"{self.name(o['from'])} gives {trade_side(o['give'])} for your "
+                    f"{trade_side(o['get'])}{linked_note(o)}:  /accept {oid}  or  /reject {oid}",
                     a["TRADE"])
+        if self.me in (self.public.get("ready") or []) and phase in ("NEGOTIATION", "MOVEMENT",
+                                                                     "AUCTION"):
+            return ("You are ready. Waiting for the others (or the clock).  /unready to take "
+                    "it back", curses.A_DIM)
         if phase == "MOVEMENT":
             if self.movement:
-                return (f"Moving {self.movement} (secret). Press 1, 2 or 3 to change it.",
-                        a["PRIVATE"])
+                return (f"Moving {self.movement} (secret). Press 1, 2 or 3 to change it, "
+                        "/ready when done.", a["PRIVATE"])
             return "Press 1, 2 or 3 to choose your move (secret). No choice = 1.", a["warn"]
         if phase == "AUCTION":
             mine = [t for t in self.public.get("auctions") or [] if self.me in self.sale(t)[2]]
@@ -871,8 +901,8 @@ class TuiUI(ClientUI):
                         f"   /cancelbid {t} withdraws", a["AUCTION"])
             return "Nothing for you to buy this round. Type to chat.", curses.A_DIM
         if phase == "NEGOTIATION":
-            return ("Type to chat.  /tell <name> msg   /offer <buyer> <property> <price>   "
-                    "Tab completes", curses.A_DIM)
+            return ("Type to chat.  /offer <buyer> <property> <price>   /trade   "
+                    "/ready when done   Tab completes", curses.A_DIM)
         if phase == "LOBBY":
             return "Waiting for the operator to start the match...", curses.A_DIM
         if phase == "ENDED":

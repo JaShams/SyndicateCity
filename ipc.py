@@ -120,7 +120,9 @@ class Request:
 
 
 def _dumps(obj) -> str:
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+    # allow_nan=False: NaN/Infinity are not JSON and must never reach a client.
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False, sort_keys=True,
+                      allow_nan=False)
 
 
 def _encode_bounded(obj, limit: int) -> Optional[str]:
@@ -360,11 +362,17 @@ class ServerIPC:
         if bound is not None and bound != pid:
             raise RequestError("DUPLICATE_SESSION", "connection already bound to another slot")
         result = await self._handler(Caller(sender, uid, pid), req)
-        # Re-check: a concurrent Join from another connection may have won.
+        # Re-check: a concurrent Join from another connection may have won. That
+        # session is live, so the player really is connected: nothing to undo.
         current = self._by_player.get(pid)
         if current is not None and current != sender:
             raise RequestError("DUPLICATE_SESSION", "this player already has an active session")
         if not await self._bind(sender, pid):
+            # The handler already marked the player connected, but the caller left
+            # before we could bind it, so its NameOwnerChanged found nothing to
+            # unbind. Undo the join here or the slot stays "connected" with no session.
+            if self._on_disconnect and pid not in self._by_player:
+                await self._on_disconnect(pid)
             raise RequestError("DISCONNECTED", "caller disconnected during join")
         return result
 
@@ -382,7 +390,11 @@ class ServerIPC:
         if visibility == "public":
             self._pseq += 1
             event["pseq"] = self._pseq
-        text = _encode_bounded(event, MAX_EVENT_BYTES)
+        try:
+            text = _encode_bounded(event, MAX_EVENT_BYTES)
+        except ValueError:          # NaN/Infinity somewhere in the data
+            log.error("event %s contains a non-finite number; dropped", etype)
+            return None
         if text is None:
             log.error("event %s exceeds %d bytes; dropped", etype, MAX_EVENT_BYTES)
         return text

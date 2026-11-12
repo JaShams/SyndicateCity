@@ -72,6 +72,7 @@ SCRIPTS = {
 /move 3
 @round 2 movement
 /move 3
+/ready
 """,
     "p4": """
 @round 1 movement
@@ -137,3 +138,25 @@ def test_scripted_clients_play_a_match(private_bus, tmp_path):
     errors = [(slot, line) for slot, text in logs.items() for line in text.splitlines()
               if line.startswith("[ERROR")]
     assert not errors, errors
+
+
+def test_trade_command_parsing_and_wording():
+    from client import ClientUI
+    ui = ClientUI(conn=None, color=False, interactive=False)
+    ui.me = "p1"
+    ui.public = {"players": [{"id": "p1", "name": "alice"}, {"id": "p2", "name": "bob"}]}
+    assert ui.parse_trade("bob give old town,$50 get techpark".split()) == {
+        "to": "bob", "give_props": [2], "give_cash": 50, "get_props": [10], "get_cash": 0}
+    assert ui.parse_trade("bob get 4+5 give $300 link o7".split()) == {
+        "to": "bob", "give_props": [], "give_cash": 300, "get_props": [4, 5], "get_cash": 0,
+        "link": "o7"}
+    for bad in ("bob oldtown", "bob give $1,$2 get 4", "bob give nowhere get 4",
+                "bob give 1 get 4 link o1 o2", "bob give $x get 4"):
+        try:
+            ui.parse_trade(bad.split())
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+    offer = {"from": "p2", "to": "p1", "give": {"props": [10], "cash": 0},
+             "get": {"props": [2], "cash": 50}, "linked": 1}
+    assert ui.terms(offer) == "bob gives Tech Park; you give Old Town + 50 credits"

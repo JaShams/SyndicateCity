@@ -47,11 +47,17 @@ The setup script does the following. It is idempotent and can be undone with `su
 | users `syndicate-p1` … `syndicate-pN` (locked passwords) | One account per player; reached via `sudo -u` |
 | `/opt/syndicate-city/` (root-owned, read-only) | Installed code plus a venv with `dbus-next` |
 | `/etc/syndicate-city/bus.conf`, `roster.json` | Rendered bus policy and the UID→slot roster |
+| `/etc/syndicate-city/accounts.record` (root, 0600) | Which accounts and group setup created, with their UIDs/GIDs |
 | `/var/log/syndicate-city/` (mode 0700, service user) | Restricted audit logs |
 
 At runtime, `/run/syndicate-city/` is created with owner `syndicate-server:syndicate` and mode `0750`. It holds the socket, the address file and the pid file. System-wide bus services are never modified.
 
 The script finishes by printing every account's UID and checking that they are all different.
+
+**Existing accounts are never taken over or deleted by accident.** Setup records every account and group it creates, with its UID/GID. If `syndicate-pN`, `syndicate-server` or the `syndicate` group already exists and setup did not create it, setup stops before changing anything. `--uninstall` deletes only recorded accounts whose UID/GID still match, and leaves everything else alone.
+
+* `--adopt-existing` reuses such accounts anyway. They are recorded as adopted, so `--uninstall` removes them from the `syndicate` group but never deletes them.
+* Installs made by an older `setup.sh` have no record. On those, `--uninstall` lists the matching accounts without deleting them. If they really are all Syndicate City accounts, run `sudo scripts/setup.sh --uninstall --force-legacy`.
 
 **Watching bus traffic (debugging only).** `sudo scripts/setup.sh --debug-monitor` renders a bus policy that also lets root connect and call `BecomeMonitor`. Restart the bus (`sudo scripts/stop.sh`, then `run_server.sh`), and watch with:
 
@@ -104,7 +110,8 @@ Any client can play a script: `scripts/run_client.sh 1 --script my-moves.txt`. A
 | Flag (server.py / run_server.sh) | Default |
 |---|---|
 | `--rounds` | 7 |
-| `--negotiation-seconds` / `--movement-seconds` / `--auction-seconds` | 45 / 15 / 25 |
+| `--negotiation-seconds` / `--movement-seconds` / `--auction-seconds` | 45 / 15 / 25 (finite, > 0 and ≤ 3600; anything else is refused at startup) |
+| `--always-negotiate` | off: a round skips negotiation while nobody owns a property, which is always true of round 1 |
 | `--require-players N` | off (the roster defines the player count) |
 | `--linger` | 30 s (keeps serving snapshots after the match ends) |
 | roster | `/etc/syndicate-city/roster.json` (entries take `user` or `uid`; see `config/roster.example.json`) |
@@ -129,10 +136,13 @@ Any client can play a script: `scripts/run_client.sh 1 --script my-moves.txt`. A
 | 11 | Uptown | property | Red | 220 | 40 | 176 |
 
 * **Round phases:**
-  1. **NEGOTIATION (45 s).** Public, private and group chat are open. A property's owner can make a formal offer to sell it for credits; the buyer may accept or reject it. Accepted trades settle immediately and atomically. Unanswered offers expire when the phase ends.
+  1. **NEGOTIATION (45 s).** Public, private and group chat are open. Players make formal trade offers to each other (see *Trades* below); the recipient may accept or reject. Accepted trades settle immediately and atomically. Unanswered offers expire when the phase ends. **Skipped while nobody owns a property**, so round 1 always starts in MOVEMENT.
   2. **MOVEMENT (15 s).** Each player privately picks 1, 2 or 3 and may change the choice until the deadline. Anyone who doesn't choose moves 1. All moves are revealed and resolved at the same moment.
   3. **AUCTION (25 s, only if something was discovered).** Every unowned property that someone landed on goes on sale, but only to the players who landed on it. A single lander may buy it at its face value (`/buy`). Two or more landers bid against each other in a sealed auction (`/bid`).
   4. **SETTLEMENT.** Purchases and auctions close, results are announced, and the next round begins.
+* **Ending a phase early:** in NEGOTIATION, MOVEMENT and AUCTION, `/ready` says you are done. Once every connected player is ready, the phase ends at once instead of waiting for the clock. Disconnected players count as ready, so they cannot stall the table. If nobody is connected, the clock still decides. `/unready` takes it back, and readiness resets with every phase. A `/ready` names the round and phase it was meant for, so one that arrives late cannot end the next phase.
+* **Trades:** an offer lists what each side gives: up to 4 properties each, plus credits from one side. Both sides must give something, and at least one property must change hands. That covers selling for credits, buying for credits, property-for-property swaps, and swaps with credits on top. Ownership and cash are checked again when the offer is accepted.
+  * **Linked offers:** an offer can be linked to up to two more of your pending offers (to the same or different players). The group goes through only when every recipient has accepted. Until then, each acceptance is recorded as `AGREED` and cannot be withdrawn. A rejection, cancellation, expiry or invalid member voids the whole group. Recipients are told their offer is linked and how many others it depends on, but not those offers' terms. Linked offers cannot share a property.
 * **Landing effects:**
   * Landing on another player's property costs its rent. Rent doubles if the owner holds both properties in that district.
   * Rent and Checkpoint charges can push cash below zero. Negative cash is debt, not elimination.
@@ -156,8 +166,10 @@ Any client can play a script: `scripts/run_client.sh 1 --script my-moves.txt`. A
 /help  /board  /status  /players  /offers  /quit
 /say <msg>                     /tell <player> <msg>          /group <p1,p2> <msg>
 /offer <buyer> <property> <price>    /accept <id>   /reject <id>   /canceloffer <id>
+/trade <player> give <items> get <items> [link <id>]    items: properties and $credits, comma-separated
 /move <1|2|3>                  /bid <property> <amount>      /cancelbid <property>
-short forms: /m /b /a /r /t /s /p /h /q
+/ready   /unready              done with this phase (ends early once everyone is ready)
+short forms: /m /b /a /r /t /s /p /h /q   /done /d = /ready
 ```
 
 Properties can be given by tile number or name (`10`, `techpark`, `tech park`). A line without a leading `/` is sent as public chat. Every output line is tagged `SERVER / PUBLIC / GROUP / PRIVATE / TRADE / AUCTION / ERROR` along with the round and phase. All text from other players is stripped of terminal control characters before it is printed.
@@ -196,7 +208,7 @@ await s.close()
 | Name | `org.syndicate.City`, requested with `DO_NOT_QUEUE`. Startup aborts unless we become the primary owner |
 | Method | One method, `org.syndicate.City1.Request(s) → s`, carrying a versioned JSON envelope `{v, id, action, payload}`. Exact key set, `v == 1`, `id` of 1–64 safe characters, allowlisted action, max 4096 bytes. Responses are also limited to 4096 bytes |
 | Identity | On `Join`, the D-Bus header `sender` (set by the daemon, unforgeable) goes to `GetConnectionUnixUser`, which gives a UID, which maps to a roster slot. Binding is `unique name ↔ slot`. Later requests are authorized only by that binding. A second live connection for the same slot is refused |
-| Disconnects | Watches the bus driver's `NameOwnerChanged` (with the sender checked). When a bound unique name vanishes, the binding is cleared and `on_disconnect` fires |
+| Disconnects | Watches the bus driver's `NameOwnerChanged` (with the sender checked). When a bound unique name vanishes, the binding is cleared and `on_disconnect` fires. If a caller vanishes during `Join`, after the coordinator marked it connected but before the binding exists, `on_disconnect` fires too, so no "connected" player is left without a session |
 | Events | Signal `org.syndicate.City1.GameEvent(s)` with `{v, seq, pseq?, type, visibility, round, data}`. `pseq` counts public events contiguously so clients can detect missed broadcasts |
 | Provenance (client) | AddMatch with `sender='org.syndicate.City'`. Additionally, any `GameEvent` whose sender is not the coordinator's unique name (resolved at connect time) is dropped and reported locally as `_ForgedSignalIgnored`. Visibility is derived from the D-Bus destination header, not from the payload |
 | Bounds | Request timeout of 5 s. Client event queue of 1000. Server outbox is bounded. Event size ≤ 16 KiB |
@@ -261,13 +273,14 @@ sudo scripts/integration_multiuser.sh   # after setup: real distinct UIDs end-to
 
 | Suite | What it covers |
 |---|---|
-| `tests/test_game.py` | Every rule in §4: wrap and START bonus, special tiles, rent and district doubling, debt, defaults, deadlines, fixed-price single-lander purchase, lander-only auctions, auction minimum, replacement, cancellation, reservation, tie-break rotation, trades (stale, duplicate, atomic), chat limits, scoring and ties. Also **100 randomized 4–6-player matches** checking invariants after every step |
-| `tests/test_ipc.py` | Real private `dbus-daemon`: join and roster mapping, unknown UID, duplicate session, public/private/group routing, contiguous `pseq`, a full match, private bid status, crash during auction then rejoin with the bid kept, single coordinator name, no `dbus_next` imports outside `ipc.py` |
+| `tests/test_game.py` | Every rule in §4: wrap and START bonus, special tiles, rent and district doubling, debt, defaults, deadlines, fixed-price single-lander purchase, lander-only auctions, auction minimum, replacement, cancellation, reservation, tie-break rotation, trades (stale, duplicate, atomic, bundles, linked groups), skipped empty negotiation, ending phases early with ready, phase-duration validation, chat limits, scoring and ties. Also **100 randomized 4–6-player matches** checking invariants after every step |
+| `tests/test_ipc.py` | Real private `dbus-daemon`: join and roster mapping, unknown UID, duplicate session, disconnect during `Join` (no ghost player), public/private/group routing, contiguous `pseq`, a full match, private bid status, crash during auction then rejoin with the bid kept, phases ending early once everyone is ready (or the last holdout leaves), round 1 skipping negotiation, bad `--*-seconds`/`--rounds` refused, single coordinator name, no `dbus_next` imports outside `ipc.py` |
 | `tests/test_concurrency.py` | 20 concurrent bids, half beyond cash (no overspend), 10 concurrent accepts (settles once), concurrent replay, simultaneous movement, median ack latency < 250 ms |
 | `tests/test_security.py` | Policy with a non-service UID: cannot own the name, cannot `BecomeMonitor` (nor can the service UID; the root monitor policy appears only with `--debug-monitor`), cannot start a server, player signals never delivered, no direct calls between players. Plus forged-signal rejection by the client, eavesdrop match rules, identity swap, replay, wrong phase, malformed input, overbid, flood, terminal escapes, audit log mode |
 | `tests/test_script_client.py` | `client.py --script`: the parser, then four scripted client processes play a match covering chat, a trade accepted by `@accept`, an outbid and a skipped auction |
 | `tests/test_processes.py` | Scripted players as separate OS processes. Player 2 is killed with SIGKILL mid-auction and restarted; the logs are then checked with `verify_multiuser.py` |
 | `scripts/integration_multiuser.sh` | The same checks with **four distinct Linux UIDs** plus the service UID. Adversarial probes run as `syndicate-p4` |
+| `scripts/test_setup_accounts.sh` | **Disposable container only** (it creates and deletes accounts): setup refuses pre-existing accounts, `--adopt-existing`, idempotent re-runs, uninstall keeps adopted, replaced and legacy accounts, `--force-legacy`, then a full `integration_multiuser.sh` run. `docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash /src/scripts/test_setup_accounts.sh` |
 
 The pytest integration tests run under a single account. They swap only the UID resolver (a test-only hook) so that several slots can be filled; every other code path, including the policy file, is the production one. The multi-UID script needs no such hook.
 
