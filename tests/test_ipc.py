@@ -208,3 +208,89 @@ def test_rejoin_before_disconnect_notice_is_processed(private_bus):
         assert s.server.player_for(old_name) is None
         await s.close()
     run(body())
+
+
+def test_disconnect_during_join_leaves_no_ghost(private_bus):
+    """Join runs the handler (marks connected) before binding; a failed bind must undo it."""
+    async def body():
+        s = await Stack(private_bus).start()
+        watcher = await s.connect("p1")
+        ghost = await ipc.GameIPC.connect_client(private_bus.address)
+        s.fake_uids[ghost.unique_name] = 50001
+
+        async def gone(_name):        # the caller vanished between handler and bind
+            return False
+        s.server._still_alive = gone
+        with pytest.raises(ipc.RequestError) as e:
+            await ghost.join()
+        assert e.value.code == "DISCONNECTED"
+        assert not s.coord.game.players["p2"].connected
+        assert not s.server.is_connected("p2")
+        await wait_for(watcher, "PlayerDisconnected", pred=lambda e: e["data"]["player"] == "p2")
+        with pytest.raises(Exception):
+            await s.start_match()                 # a ghost must not count as present
+        await ghost.close()
+        await s.close()
+    run(body())
+
+
+def test_everyone_ready_ends_the_phase_early(private_bus):
+    async def body():
+        s = await Stack(private_bus).start(neg=30, mov=30)
+        c = await s.connect_all()
+        await s.start_match()
+        g = s.coord.game
+        assert g.phase.value == "NEGOTIATION"
+        for pid in ("p1", "p2", "p3"):
+            res = await c[pid].request("Ready", {"round": 1, "phase": "NEGOTIATION"})
+            assert res["ready"] is True
+        ev = await wait_for(c["p4"], "PlayerReady", pred=lambda e: e["data"]["count"] == 3)
+        assert ev["data"]["needed"] == 4 and g.phase.value == "NEGOTIATION"
+        with pytest.raises(ipc.RequestError) as e:
+            await c["p4"].request("Ready", {"round": 1, "phase": "MOVEMENT"})
+        assert e.value.code == "STALE_PHASE"
+        await c["p4"].request("Ready", {"round": 1, "phase": "NEGOTIATION"})
+        await wait_for(c["p1"], "PhaseChanged", timeout=3,
+                       pred=lambda e: e["data"]["phase"] == "MOVEMENT")
+        # The last player still deciding leaves: the others are ready, so move on.
+        for pid in ("p1", "p2", "p3"):
+            await c[pid].request("Ready", {"round": 1, "phase": "MOVEMENT"})
+        await c["p4"].close()
+        await wait_for(c["p1"], "MovementRevealed", timeout=3)
+        await s.close()
+    run(body())
+
+
+def test_round_one_skips_negotiation_by_default(private_bus):
+    async def body():
+        s = await Stack(private_bus).start(skip=True)
+        c = await s.connect_all()
+        await s.start_match()
+        ev = await wait_for(c["p1"], "PhaseChanged")
+        assert ev["data"]["round"] == 1 and ev["data"]["phase"] == "MOVEMENT"
+        note = await wait_for(c["p1"], "Notice")
+        assert "skips negotiation" in note["data"]["text"]
+        await s.close()
+    run(body())
+
+
+@pytest.mark.parametrize("flag", ["--negotiation-seconds", "--movement-seconds",
+                                  "--auction-seconds"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-3", "1e9", "abc"])
+def test_server_rejects_unusable_phase_durations(flag, value, capsys):
+    import server
+    with pytest.raises(SystemExit):
+        server.parse_args(["--roster", "r.json", f"{flag}={value}"])
+    assert "phase duration" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "x"])
+def test_server_rejects_bad_round_counts(value):
+    import server
+    with pytest.raises(SystemExit):
+        server.parse_args(["--roster", "r.json", f"--rounds={value}"])
+
+
+def test_events_never_carry_non_finite_numbers():
+    with pytest.raises(ValueError):
+        ipc._dumps({"remaining": float("inf")})

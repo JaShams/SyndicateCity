@@ -1,17 +1,16 @@
 # bob (p2). Run with: scripts/run_client.sh 2 --script /opt/syndicate-city/demo/p2.txt
 
-@round 1
-@wait 3
-/say Big talk for someone with zero properties.
-@wait 9
-/group carol,dave alice always overbids. Let her.
 @round 1 movement
 /move 2
 @round 1 auction
 @wait 1
 /bid Old Town 140
-@wait 2
+@wait 1
+/say Big talk for someone with zero properties.
+@wait 1
 /tell carol You're not bidding on Old Town, right?
+@wait 2
+/group carol,dave alice always overbids. Let her.
 
 @round 2
 @wait 3
@@ -44,6 +43,7 @@
 /say Great. Now dave has Purple too.
 @round 4 movement
 /move 3
+/ready
 @round 4 auction
 @wait 1
 /bid Tech Park 240

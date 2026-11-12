@@ -40,6 +40,7 @@ runuser -u "$SC_SERVER_USER" -- "$SC_PYTHON" "$SC_INSTALL_DIR/server.py" \
     --roster "$SC_ROSTER" --bus-address-file "$SC_ADDRESS_FILE" \
     --audit-log "$SC_LOG_DIR/audit-integration.jsonl" \
     --negotiation-seconds 2 --movement-seconds 2 --auction-seconds 3 --rounds 3 --linger 8 \
+    --always-negotiate \
     < "$OUT/console" > "$OUT/server.log" 2>&1 &
 PIDS+=($!)
 exec 7>"$OUT/console"          # keep the console pipe open

@@ -104,7 +104,7 @@ The countdown is only a guide. The **server's** clock decides when a phase ends,
 * **Board:** the 12-tile ring. Each property shows its owner (or price), and each player is a numbered, coloured pawn. Your own tile is outlined in your colour, tiles up for auction are highlighted, and `*` marks doubled rent. The centre shows who holds each district.
 * **Side panel:** your cash, reserved bids, free cash and net worth; offers to and from you; properties for sale with their price (`>=` marks a contested auction's minimum bid) and your bid; every player's cash and net worth; the tie-break order; and your properties.
 * **Log:** the same tagged lines as the normal client. On terminals 110 columns or wider, chat gets its own column on the right.
-* **Hint line:** what you can do right now, for example `bob offers you Old Town for 230: /accept o3 or /reject o3`.
+* **Hint line:** what you can do right now, for example `bob gives Old Town for your 230 credits:  /accept o3  or  /reject o3`.
 
 Keys:
 
@@ -115,6 +115,7 @@ Keys:
 | `Up` / `Down` | Command history |
 | `PgUp` / `PgDn`, `End` | Scroll the log, jump back to the latest |
 | `F1` or `/help` | Help window (`Esc` closes it) |
+| `F2` | Ready / not ready (same as `/ready` and `/unready`) |
 | `Ctrl-C` or `/quit` | Leave the game |
 
 `/board` hides or shows the map, and `/clear` empties the log. The terminal needs to be at least 80×24 to show the board; on smaller terminals the panel and log still work. The terminal bell rings when someone sends you a trade offer or a private or group message. When the match ends, the final scoreboard opens in a window and is printed again after you quit.
@@ -130,12 +131,29 @@ A match lasts **7 rounds**. The operator can choose fewer for a quick game. Ever
    chat, trade            secret move          buy or bid                      results, next round
 ```
 
-### NEGOTIATION — talk and trade
-
-You can chat freely and make, accept or reject formal property offers (see [Trading](#7-trading-properties)). Any offer still unanswered when the phase ends expires.
+**Round 1 has no NEGOTIATION.** There is nothing to trade until someone owns a property, so any round where nobody owns one starts straight in MOVEMENT:
 
 ```
-[SERVER R1 NEGOTIATION] === Round 1 === NEGOTIATION for 10s. Tie-break priority: alice > bob > carol > dave
+[SERVER R1 MOVEMENT] === Round 1 === Tie-break priority: alice > bob > carol > dave
+[SERVER R1 MOVEMENT] MOVEMENT: choose /move 1|2|3 within 15s (default 1), then /ready
+[SERVER R1 MOVEMENT] Nobody owns a property yet, so round 1 skips negotiation.
+```
+
+**Done early? Type `/ready`.** In NEGOTIATION, MOVEMENT and AUCTION, `/ready` tells everyone you have finished. As soon as every connected player is ready, the phase ends without waiting for the clock. Everyone sees who is ready:
+
+```
+[SERVER R3 MOVEMENT] bob is ready (2/4 ready)
+```
+
+You can still act after typing `/ready`, for example change your move or answer an offer. `/unready` takes it back. Readiness resets at every new phase. Players who are disconnected count as ready, so one absent player can't hold up the table. In the full-screen client, `F2` toggles ready.
+
+### NEGOTIATION — talk and trade
+
+You can chat freely and make, accept or reject formal trade offers (see [Trading](#7-trading-properties)). Any offer still unanswered when the phase ends expires.
+
+```
+[SERVER R2 NEGOTIATION] === Round 2 === Tie-break priority: bob > carol > dave > alice
+[SERVER R2 NEGOTIATION] NEGOTIATION for 45s: chat and trade. /ready when you are done
 ```
 
 The **tie-break priority** shown here decides who wins a tied auction this round. It rotates every round (see [Auctions](#6-auctions)).
@@ -303,40 +321,73 @@ In commands, you can name a property by its tile number or its name: `10`, `tech
 
 ## 7. Trading properties
 
-During **NEGOTIATION**, the owner of a property can offer to sell it to one player for a fixed price:
+During **NEGOTIATION** you can offer a trade to any one player. They can accept it or reject it.
+
+**Selling a property for credits** has a short form:
 
 ```
 /offer bob dockyard 180
 ```
 
 ```
-[TRADE R2 NEGOTIATION] offer o1 sent: Dockyard to bob for 180
+[TRADE R2 NEGOTIATION] offer o1 sent to bob: you give Dockyard; bob gives 180 credits
 ```
 
-The buyer sees the offer together with its ID:
+**Any other trade** uses `/trade`. List what you give and what you want back. Items are properties (by name or tile number) and credits written as `$amount`, separated by commas:
 
 ```
-[TRADE R2 NEGOTIATION] alice offers you Dockyard for 180 -> /accept o1 or /reject o1    (format example)
+/trade bob give oldtown get techpark                 swap two properties
+/trade bob give oldtown,$50 get techpark             a property plus 50 credits for one
+/trade bob give dockyard,oldtown get midtown         two properties for one
+/trade bob give $200 get midtown                     offer to buy bob's Midtown
 ```
 
-The buyer then answers with `/accept o1` or `/reject o1`. The seller can withdraw an offer with `/canceloffer o1`. `/offers` lists your pending offers in both directions (`OUT` means you are selling, `IN` means you are buying):
+Each side can include up to 4 properties. Only one side can add credits, and at least one property has to change hands.
+
+The other player sees the offer and its ID:
 
 ```
-  OUT o1: alice sells Dockyard to bob for 180
+[TRADE R2 NEGOTIATION] alice offers you a trade (o2): alice gives Old Town + 50 credits; you give Tech Park -> /accept o2 or /reject o2
 ```
 
-Things to know:
+The recipient answers with `/accept o2` or `/reject o2`. You can withdraw your own offer with `/canceloffer o2`. `/offers` lists your pending offers in both directions (`OUT` = you made it, `IN` = it was made to you):
 
-* **One property for credits.** You can't swap two properties or bundle several into one offer. A swap can be done as two separate sales.
-* The **buyer must have the cash** when they accept. Making an offer does not lock up the buyer's money.
-* An accepted trade happens immediately and **can't be undone**. If you made several offers for the same property, only the first one accepted goes through; the others become `INVALID`.
+```
+  OUT o2: you give Old Town + 50 credits; bob gives Tech Park
+```
+
+### Linked offers: all or nothing
+
+Sometimes two trades only make sense together. Say you will sell Dockyard to bob only if carol also buys Old Town. Make the first offer, then link the second one to it by its ID:
+
+```
+/offer bob dockyard 150
+/trade carol give oldtown get $160 link o3
+```
+
+Linked offers go through **only when every recipient has accepted**. Until then, each acceptance is held as `AGREED`, and nothing changes hands:
+
+```
+[TRADE R3 NEGOTIATION] bob agreed to offer o3; it goes through once every linked offer is accepted
+```
+
+* Each recipient is told the offer is linked and to how many others (`[linked with 1 other offer: all or nothing]`), but not what those other offers contain.
+* If any linked offer is rejected, cancelled, expires or becomes invalid, all of them are called off, and the reason is shown.
+* Agreeing to a linked offer is binding. You can't reject it afterwards, but the whole group is called off if it doesn't complete before NEGOTIATION ends.
+* Up to 3 offers can be linked. Linked offers can't include the same property twice. You can only link to your own offers that nobody has answered yet.
+
+### Things to know
+
+* Making an offer doesn't lock anything up. Ownership and credits are checked again at the moment the trade goes through. If the player who must pay credits doesn't have them, it fails, and so does the whole linked group.
+* An accepted trade happens immediately and **can't be undone**. Any other open offer that included a property that just changed hands becomes `INVALID`.
+* Everyone sees which properties changed hands (`alice traded Old Town + credits to bob for Tech Park`). The amount of credits stays private to the two players.
 * Offers that are still open when NEGOTIATION ends **expire**:
 
   ```
-  [TRADE R2 NEGOTIATION] offer o1 (Dockyard, 180, alice -> bob): EXPIRED
+  [TRADE R2 NEGOTIATION] offer o1 (you give Dockyard; bob gives 180 credits): EXPIRED
   ```
 
-* Limits: a seller can have at most 3 offers open at once, and a buyer can receive at most 6.
+* Limits: you can have at most 3 offers open at once, and receive at most 6.
 
 ---
 
@@ -359,7 +410,7 @@ Chat is open during **NEGOTIATION** and **AUCTION**. Messages are at most 300 ch
 
 Players can be named by name (`bob`) or slot (`p2`).
 
-**Promises are not enforced.** Agreements made in chat are part of the game, and so is breaking them. Only formal `/offer` trades are binding.
+**Promises are not enforced.** Agreements made in chat are part of the game, and so is breaking them. Only formal `/offer` and `/trade` trades are binding.
 
 ---
 
@@ -399,16 +450,18 @@ There is no early win. Disconnected players stay in the game and simply move 1 e
 | `/say <msg>` | NEGOTIATION, AUCTION | Public chat |
 | `/tell <player> <msg>` | NEGOTIATION, AUCTION | Private message |
 | `/group <p1,p2> <msg>` | NEGOTIATION, AUCTION | Message to selected players |
-| `/offer <buyer> <property> <price>` | NEGOTIATION | Offer to sell a property you own |
+| `/offer <buyer> <property> <price>` | NEGOTIATION | Offer to sell a property you own for credits |
+| `/trade <player> give <items> get <items> [link <id>]` | NEGOTIATION | Any trade of properties and `$credits`; `link` makes it all-or-nothing with your offer `<id>` |
 | `/accept <id>` / `/reject <id>` | NEGOTIATION | Answer an offer made to you |
 | `/canceloffer <id>` | NEGOTIATION | Withdraw your own offer |
+| `/ready` / `/unready` | NEGOTIATION, MOVEMENT, AUCTION | Say you are done with this phase; it ends early once everyone connected is ready |
 | `/move <1\|2\|3>` | MOVEMENT | Choose your move (changeable until the deadline) |
 | `/buy <property>` | AUCTION | Buy a property only you landed on, at its listed value |
 | `/bid <property> <amount>` | AUCTION | Place or replace a sealed bid on a property you and others landed on |
 | `/cancelbid <property>` | AUCTION | Withdraw your purchase or bid |
 | `/quit` | any | Leave. You stay in the match and can come back (see §13) |
 
-Short forms: `/m` = `/move`, `/b` = `/bid`, `/a` = `/accept`, `/r` = `/reject`, `/t` = `/tell`, `/s` = `/status`, `/p` = `/players`, `/h` = `/help`, `/q` = `/quit`. For example, `/b 1 150` bids 150 on Dockyard.
+Short forms: `/m` = `/move`, `/b` = `/bid`, `/a` = `/accept`, `/r` = `/reject`, `/t` = `/tell`, `/s` = `/status`, `/p` = `/players`, `/h` = `/help`, `/q` = `/quit`, `/done` and `/d` = `/ready`. For example, `/b 1 150` bids 150 on Dockyard.
 
 ---
 
@@ -427,10 +480,11 @@ A refused action prints `[ERROR ...] CODE: explanation`, and nothing in the game
 | `INSUFFICIENT_FUNDS` | Not enough available cash (debt or other bids count against you) | Lower the bid, or cancel another bid |
 | `NO_AUCTION` | That property isn't for sale this round | Check `open sales` in `/status` |
 | `NO_BID` | `/cancelbid` on a property you haven't bid on | — |
-| `NOT_OWNER` | You tried to sell a property you don't own | — |
+| `NOT_OWNER` | A trade lists a property that isn't yours to give, or isn't the other player's | Check `/players` |
 | `UNKNOWN_OFFER` | No such offer, or it isn't addressed to you | Check `/offers` |
-| `OFFER_CLOSED` | The offer was already accepted, rejected, cancelled or expired | — |
-| `OFFER_INVALID` | The seller no longer owns the property | — |
+| `OFFER_CLOSED` | The offer was already answered, cancelled or expired, or you tried to link to one someone already agreed to | — |
+| `OFFER_INVALID` | A property in the trade (or a linked one) changed hands, or the player paying credits can't any more | — |
+| `STALE_PHASE` | Your `/ready` arrived after that phase had already ended | Look at the new phase and `/ready` again if you are done |
 | `UNKNOWN_PLAYER` / `UNKNOWN_PROPERTY` | A name the game doesn't recognise | Use names from `/players` or `/board` |
 | `LIMIT_EXCEEDED` | Too many open offers | Cancel one or wait |
 | `TOO_LONG` | Chat message over 300 characters | Shorten it |
@@ -514,25 +568,28 @@ request latency ms: p50=0.48 p95=1.59 max=1.59 (n=14)
 sudo scripts/run_server.sh --rounds 3 --negotiation-seconds 20 --movement-seconds 8 --auction-seconds 12
 ```
 
+Phase lengths must be a positive, finite number of seconds, at most 3600. The server refuses to start with `0`, a negative number, `nan` or `inf`. Add `--always-negotiate` to keep a negotiation phase even in rounds where nobody owns anything yet.
+
 **A self-playing demo:** `sudo scripts/demo.sh` (it needs `tmux`) runs a full 4-round match with nobody at the keyboard. The server and four clients share one window, and each client plays its script from `demo/`.
 
 **Scripted players.** `scripts/run_client.sh <n> --script FILE` makes a client play the commands in FILE instead of reading the keyboard. Blank lines and lines starting with `#` are ignored. Any other line is typed exactly as at the prompt, and the window shows it as a `[SCRIPT]` line. Lines starting with `@` control timing:
 
 | Line | Effect |
 |---|---|
-| `@round 2 movement` | Wait for that round and phase (`negotiation`, `movement` or `auction`; default `negotiation`). If the phase already passed, or never happens (no auction that round), everything up to the next `@round` is skipped |
+| `@round 2 movement` | Wait for that round and phase (`negotiation`, `movement` or `auction`; default `negotiation`). If the phase already passed, or never happens (no auction that round, or no negotiation because nobody owned a property yet, as in round 1), everything up to the next `@round` is skipped |
 | `@wait 3` | Pause for 3 seconds, e.g. to pace a conversation |
 | `@accept bob` / `@reject bob` | Wait for the next offer made to you (from bob; any seller if no name is given) and accept or reject it. Gives up when the phase ends |
 | `@end` | Stop reading the script. The client still waits for the final scoreboard, then exits |
 
 ```
-@round 1
-@wait 2
-/tell bob Want Dockyard for 180?
 @round 1 movement
 /move 2
 @round 1 auction
 /buy Old Town
+@round 2
+@wait 2
+/tell bob Want Old Town for 200?
+/offer bob oldtown 200
 ```
 
 Keep the phase timers long enough for each script's `@wait`s. The scripts in `demo/` assume the timers `scripts/demo.sh` uses: 25 s negotiation, 6 s movement and 12 s auction.

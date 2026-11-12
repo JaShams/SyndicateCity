@@ -41,7 +41,7 @@ def test_concurrent_accepts_settle_once(private_bus):
         g = s.coord.game
         g._transfer_property(2, "p2")
         offer = await c["p2"].request("CreateTradeOffer",
-                                      {"buyer": "alice", "property_id": 2, "price": 200})
+                                      {"to": "alice", "give_props": [2], "get_cash": 200})
         oid = offer["offer_id"]
         results = await asyncio.gather(
             *[c["p1"].request("AcceptTradeOffer", {"offer_id": oid}) for _ in range(10)],
@@ -50,7 +50,7 @@ def test_concurrent_accepts_settle_once(private_bus):
         assert g.players["p1"].cash == 400 and g.players["p2"].cash == 800
         # Same request id replayed concurrently: one effect, identical responses.
         g._transfer_property(5, "p3")
-        o2 = await c["p3"].request("CreateTradeOffer", {"buyer": "bob", "property_id": 5, "price": 50})
+        o2 = await c["p3"].request("CreateTradeOffer", {"to": "bob", "give_props": [5], "get_cash": 50})
         rid = "replay-1"
         replies = await asyncio.gather(
             *[c["p2"].request("AcceptTradeOffer", {"offer_id": o2["offer_id"]}, request_id=rid)
