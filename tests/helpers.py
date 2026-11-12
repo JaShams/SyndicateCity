@@ -76,11 +76,13 @@ class Stack:
         self.lines: list[str] = []
 
     async def start(self, n=4, rounds=7, neg=30.0, mov=30.0, auc=30.0, limits=None,
-                    audit_path=None):
+                    audit_path=None, skip=False):
+        # skip=False: these tests exercise routing, so keep a round-1 negotiation to chat in.
         roster = [(f"p{i+1}", 50000 + i, NAMES[i]) for i in range(n)]
         self.roster = roster
         game = Game(roster, Settings(rounds=rounds, negotiation_seconds=neg,
-                                     movement_seconds=mov, auction_seconds=auc))
+                                     movement_seconds=mov, auction_seconds=auc,
+                                     skip_empty_negotiation=skip))
 
         async def resolver(name):
             return self.fake_uids[name]
@@ -164,11 +166,13 @@ class NetStack(Stack):
         self.address = None
 
     async def start(self, n=4, rounds=7, neg=30.0, mov=30.0, auc=30.0, limits=None,
-                    audit_path=None, port=0, log=None, history=()):
+                    audit_path=None, port=0, log=None, history=(), skip=False):
+        # skip=False, as in Stack: keep a round-1 negotiation so tests can chat in it.
         roster = [(f"p{i+1}", 50000 + i, NAMES[i]) for i in range(n)]
         self.roster = roster
         self.settings = Settings(rounds=rounds, negotiation_seconds=neg,
-                                 movement_seconds=mov, auction_seconds=auc)
+                                 movement_seconds=mov, auction_seconds=auc,
+                                 skip_empty_negotiation=skip)
         game = Game(roster, self.settings)
         self.server = await ipc.GameIPC.start_server(
             f"wss://127.0.0.1:{port}", {uid: pid for pid, uid, _ in roster}, ALLOWED_ACTIONS,

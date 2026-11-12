@@ -28,7 +28,8 @@ from typing import Callable, Optional
 
 import cmdlog
 import ipc
-from game import Event, Game, GameError, GameErrorWithEvents, Phase, Settings
+from game import (MAX_TRADE_PROPS, Event, Game, GameError, GameErrorWithEvents, Phase, Settings,
+                  check_phase_seconds)
 
 log = logging.getLogger("syndicate.server")
 
@@ -50,6 +51,18 @@ def _int(v):
 _int.desc = "32-bit integer"
 
 
+def _bool(v):
+    return type(v) is bool
+_bool.desc = "boolean"
+
+
+def _int_list(max_items: int):
+    def check(v):
+        return isinstance(v, list) and len(v) <= max_items and all(_int(x) for x in v)
+    check.desc = f"list of at most {max_items} integers"
+    return check
+
+
 def _str_list(max_items: int, max_len: int):
     def check(v):
         return (isinstance(v, list) and 0 < len(v) <= max_items
@@ -64,14 +77,19 @@ SCHEMAS: dict[str, dict] = {
     "SendPublic": {"text": (_str(1200), True)},
     "SendPrivate": {"to": (_str(32), True), "text": (_str(1200), True)},
     "SendGroup": {"to": (_str_list(8, 32), True), "text": (_str(1200), True)},
-    "CreateTradeOffer": {"buyer": (_str(32), True), "property_id": (_int, True),
-                         "price": (_int, True)},
+    "CreateTradeOffer": {"to": (_str(32), True),
+                         "give_props": (_int_list(MAX_TRADE_PROPS), False),
+                         "give_cash": (_int, False),
+                         "get_props": (_int_list(MAX_TRADE_PROPS), False),
+                         "get_cash": (_int, False),
+                         "link": (_str(16), False)},
     "AcceptTradeOffer": {"offer_id": (_str(16), True)},
     "RejectTradeOffer": {"offer_id": (_str(16), True)},
     "CancelTradeOffer": {"offer_id": (_str(16), True)},
     "SubmitMovement": {"steps": (_int, True)},
     "SubmitBid": {"property_id": (_int, True), "amount": (_int, True)},
     "CancelBid": {"property_id": (_int, True)},
+    "Ready": {"round": (_int, True), "phase": (_str(16), True), "ready": (_bool, False)},
     "Leave": {},
 }
 CHAT_ACTIONS = frozenset({"SendPublic", "SendPrivate", "SendGroup"})
@@ -171,6 +189,7 @@ class Coordinator:
         self.replaying = False
         self.started = asyncio.Event()
         self.ended = asyncio.Event()
+        self.wake = asyncio.Event()       # set when the clock should re-check early phase ends
         self.latencies: list[float] = []
         self._audit_fd = None
         if audit_path:
@@ -300,6 +319,8 @@ class Coordinator:
         return outcome
 
     def _track_lifecycle(self) -> None:
+        if self.game.all_ready():         # everyone is done: let the clock end the phase now
+            self.wake.set()
         if self.game.phase != Phase.LOBBY:
             self.started.set()
         if self.game.phase == Phase.ENDED:
@@ -386,7 +407,9 @@ class Coordinator:
         if action == "SendGroup":
             return g.send_group(pid, p["to"], p["text"], now)
         if action == "CreateTradeOffer":
-            return g.create_offer(pid, p["buyer"], p["property_id"], p["price"], now)
+            return g.create_offer(pid, p["to"], p.get("give_props", []), p.get("give_cash", 0),
+                                  p.get("get_props", []), p.get("get_cash", 0), now,
+                                  link=p.get("link"))
         if action == "AcceptTradeOffer":
             return g.accept_offer(pid, p["offer_id"], now)
         if action == "RejectTradeOffer":
@@ -399,6 +422,8 @@ class Coordinator:
             return g.submit_bid(pid, p["property_id"], p["amount"], now)
         if action == "CancelBid":
             return g.cancel_bid(pid, p["property_id"], now)
+        if action == "Ready":
+            return g.set_ready(pid, p["round"], p["phase"], p.get("ready", True), now)
         raise GameError("UNKNOWN_ACTION", action)
 
     async def handle_disconnect(self, pid: str) -> None:
@@ -421,7 +446,11 @@ class Coordinator:
         return outcome[0] == "ok"
 
     async def run_clock(self) -> None:
-        """Close phases at their deadlines (only the replica that orders commands does)."""
+        """Close phases at their deadlines, or early once everyone is ready.
+
+        Only the replica that orders commands does this; an early end is just an
+        ``advance`` command, and ``Game.advance`` decides from state alone.
+        """
         while True:
             await self.started.wait()
             if self.game.phase == Phase.ENDED:
@@ -430,8 +459,11 @@ class Coordinator:
                 await asyncio.sleep(0.2)
                 continue
             delay = self.game.phase_deadline_monotonic - self.gclock.now()
-            if delay > 0:
-                await asyncio.sleep(min(delay, 0.5))
+            if delay > 0 and not self.game.all_ready():
+                # No await between the check and clear(), so a wake-up cannot be lost.
+                self.wake.clear()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.wake.wait(), timeout=min(delay, 0.5))
                 continue
             try:
                 await self.submit({"k": "advance"})
@@ -503,7 +535,8 @@ async def main_async(args) -> int:
     roster = load_roster(args.roster)
     settings = Settings(rounds=args.rounds, negotiation_seconds=args.negotiation_seconds,
                         movement_seconds=args.movement_seconds,
-                        auction_seconds=args.auction_seconds)
+                        auction_seconds=args.auction_seconds,
+                        skip_empty_negotiation=not args.always_negotiate)
     if args.require_players and len(roster) != args.require_players:
         print(f"roster has {len(roster)} players, expected {args.require_players}", file=sys.stderr)
         return 2
@@ -614,16 +647,41 @@ async def main_async(args) -> int:
     return 0
 
 
+def _phase_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r}: phase duration must be a number "
+                                         "of seconds") from None
+    try:
+        return check_phase_seconds(value, "phase duration")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: {exc}") from None
+
+
+def _rounds(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r}: rounds must be an integer >= 1")
+    return value
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="Syndicate City coordinator")
     ap.add_argument("--roster", required=True, help="roster JSON (UID -> player slot)")
     ap.add_argument("--bus-address", help="dedicated bus address (unix:path=...)")
     ap.add_argument("--bus-address-file", default=ipc.default_bus_address_file())
     ap.add_argument("--audit-log", default=None, help="restricted JSONL audit log path")
-    ap.add_argument("--rounds", type=int, default=7)
-    ap.add_argument("--negotiation-seconds", type=float, default=45.0)
-    ap.add_argument("--movement-seconds", type=float, default=15.0)
-    ap.add_argument("--auction-seconds", type=float, default=25.0)
+    ap.add_argument("--rounds", type=_rounds, default=7)
+    ap.add_argument("--negotiation-seconds", type=_phase_seconds, default=45.0)
+    ap.add_argument("--movement-seconds", type=_phase_seconds, default=15.0)
+    ap.add_argument("--auction-seconds", type=_phase_seconds, default=25.0)
+    ap.add_argument("--always-negotiate", action="store_true",
+                    help="hold a negotiation phase even while nobody owns a property "
+                         "(by default round 1 skips it)")
     ap.add_argument("--require-players", type=int, default=0,
                     help="refuse to boot unless the roster has exactly this many players")
     ap.add_argument("--linger", type=float, default=30.0,

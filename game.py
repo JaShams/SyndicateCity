@@ -13,6 +13,7 @@ one lock around each call), so validation and commit never interleave.
 from __future__ import annotations
 
 import enum
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
@@ -23,6 +24,9 @@ from board import TILES, DISTRICTS, PROPERTY_IDS, BOARD_SIZE
 MAX_CHAT_CHARS = 300
 MAX_GROUP_RECIPIENTS = 5
 MAX_AMOUNT = 1_000_000
+MAX_PHASE_SECONDS = 3600.0
+MAX_TRADE_PROPS = 4          # properties per side of one offer
+MAX_LINKED_OFFERS = 3        # offers in one all-or-nothing group
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
 
@@ -36,8 +40,12 @@ class Phase(str, enum.Enum):
     ENDED = "ENDED"
 
 
+READY_PHASES = (Phase.NEGOTIATION, Phase.MOVEMENT, Phase.AUCTION)
+
+
 class OfferStatus(str, enum.Enum):
     PENDING = "PENDING"
+    AGREED = "AGREED"          # recipient said yes; waiting for the rest of its linked group
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
@@ -67,6 +75,19 @@ class Event:
         return cls(type_, data, "private", tuple(dict.fromkeys(recipients)))
 
 
+def check_phase_seconds(value, name: str = "phase duration") -> float:
+    """Return ``value`` as a float if it is a usable phase length, else raise ValueError.
+
+    nan, inf, zero and negative lengths would stall a phase forever or end it at once.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    value = float(value)
+    if not math.isfinite(value) or not (0 < value <= MAX_PHASE_SECONDS):
+        raise ValueError(f"{name} must be a finite number of seconds in (0, {MAX_PHASE_SECONDS:g}]")
+    return value
+
+
 @dataclass
 class Settings:
     rounds: int = 7
@@ -76,8 +97,16 @@ class Settings:
     starting_cash: int = 600
     min_players: int = 4
     max_players: int = 6
-    max_pending_offers_per_seller: int = 3
-    max_pending_offers_per_buyer: int = 6
+    max_pending_offers_per_proposer: int = 3
+    max_pending_offers_per_recipient: int = 6
+    # Negotiation is pointless while nobody owns anything (always true in round 1).
+    skip_empty_negotiation: bool = True
+
+    def __post_init__(self):
+        if isinstance(self.rounds, bool) or not isinstance(self.rounds, int) or self.rounds < 1:
+            raise ValueError("rounds must be an integer >= 1")
+        for name in ("negotiation_seconds", "movement_seconds", "auction_seconds"):
+            setattr(self, name, check_phase_seconds(getattr(self, name), name))
 
 
 @dataclass
@@ -104,17 +133,38 @@ class Property:
 
 @dataclass
 class TradeOffer:
+    """``from_id`` proposes to hand over ``give_*`` in exchange for ``to_id``'s ``get_*``.
+
+    Offers sharing a ``group`` are linked: they all settle together or not at all.
+    """
     id: str
-    seller_id: str
-    buyer_id: str
-    property_id: int
-    price: int
+    from_id: str
+    to_id: str
+    give_props: tuple
+    give_cash: int
+    get_props: tuple
+    get_cash: int
     round_created: int
+    group: Optional[str] = None
     status: OfferStatus = OfferStatus.PENDING
 
-    def to_dict(self) -> dict:
-        return {"offer_id": self.id, "seller": self.seller_id, "buyer": self.buyer_id,
-                "property_id": self.property_id, "price": self.price,
+    @property
+    def props(self) -> tuple:
+        return self.give_props + self.get_props
+
+    @property
+    def parties(self) -> tuple:
+        return (self.from_id, self.to_id)
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in (OfferStatus.PENDING, OfferStatus.AGREED)
+
+    def to_dict(self, linked: int = 0) -> dict:
+        return {"offer_id": self.id, "from": self.from_id, "to": self.to_id,
+                "give": {"props": list(self.give_props), "cash": self.give_cash},
+                "get": {"props": list(self.get_props), "cash": self.get_cash},
+                "group": self.group, "linked": linked,
                 "round": self.round_created, "status": self.status.value}
 
 
@@ -174,6 +224,7 @@ class Game:
         self.offers: dict[str, TradeOffer] = {}
         self.auctions: dict[int, Auction] = {}
         self.decisions: dict[str, int] = {}
+        self.ready: set[str] = set()          # players finished with the current phase
         self.player_priority_order: list[str] = list(ids)
         self.last_movement: list[dict] = []
         self.final_scores: Optional[list[dict]] = None
@@ -244,12 +295,13 @@ class Game:
             "auctions": sorted(t for t, a in self.auctions.items() if not a.closed),
             "landers": {str(t): sorted(a.discoverer_ids)
                         for t, a in self.auctions.items() if not a.closed},
+            "ready": sorted(self.ready) if self.phase in READY_PHASES else [],
         }
 
     def private_view(self, pid: str) -> dict:
         """Secrets visible to ``pid`` only: own offers, own bids, own movement choice."""
-        offers = [o.to_dict() for o in self.offers.values()
-                  if o.status == OfferStatus.PENDING and pid in (o.seller_id, o.buyer_id)]
+        offers = [self._offer_dict(o) for o in self.offers.values()
+                  if o.is_open and pid in o.parties]
         bids = {str(t): a.active_bids[pid] for t, a in self.auctions.items()
                 if not a.closed and pid in a.active_bids}
         return {"you": pid, "offers": offers, "bids": bids,
@@ -291,6 +343,11 @@ class Game:
         prop.owner_id = new_owner
         if new_owner is not None:
             self.players[new_owner].owned_property_ids.add(tile_id)
+
+    def _enter_phase(self, phase: Phase, seconds: float, now: float) -> None:
+        self.phase = phase
+        self.phase_deadline_monotonic = now + seconds
+        self.ready.clear()
 
     def _phase_event(self, now: float) -> Event:
         return Event("PhaseChanged", {
@@ -343,27 +400,43 @@ class Game:
         n = len(self.slot_order)
         k = (number - 1) % n
         self.player_priority_order = self.slot_order[k:] + self.slot_order[:k]
-        self.phase = Phase.NEGOTIATION
-        self.phase_deadline_monotonic = now + self.settings.negotiation_seconds
+        if self.settings.skip_empty_negotiation and not any(
+                p.owner_id for p in self.properties.values()):
+            self._enter_phase(Phase.MOVEMENT, self.settings.movement_seconds, now)
+            return [self._phase_event(now), self._board_event(now),
+                    Event("Notice", {"text": f"Nobody owns a property yet, so round {number} "
+                                             "skips negotiation."})]
+        self._enter_phase(Phase.NEGOTIATION, self.settings.negotiation_seconds, now)
         return [self._phase_event(now), self._board_event(now)]
 
+    def all_ready(self) -> bool:
+        """Every connected player is finished with this phase (and someone is connected).
+
+        Disconnected players count as finished: they cannot act, and they would
+        otherwise hold the table hostage until the deadline.
+        """
+        if self.phase not in READY_PHASES:
+            return False
+        connected = [p.id for p in self.players.values() if p.connected]
+        return bool(connected) and all(pid in self.ready for pid in connected)
+
     def advance(self, now: float) -> list[Event]:
-        """Close the current phase if its deadline has passed. Idempotent otherwise."""
+        """Close the current phase if its deadline has passed or everyone is ready.
+
+        Idempotent otherwise."""
         if self.phase in (Phase.LOBBY, Phase.ENDED, Phase.SETTLEMENT):
             return []
-        if now < self.phase_deadline_monotonic:
+        if now < self.phase_deadline_monotonic and not self.all_ready():
             return []
         if self.phase == Phase.NEGOTIATION:
             events = self._expire_offers()
-            self.phase = Phase.MOVEMENT
-            self.phase_deadline_monotonic = now + self.settings.movement_seconds
+            self._enter_phase(Phase.MOVEMENT, self.settings.movement_seconds, now)
             events.append(self._phase_event(now))
             return events
         if self.phase == Phase.MOVEMENT:
             events = self._resolve_movement(now)
             if self.auctions:
-                self.phase = Phase.AUCTION
-                self.phase_deadline_monotonic = now + self.settings.auction_seconds
+                self._enter_phase(Phase.AUCTION, self.settings.auction_seconds, now)
                 for a in self.auctions.values():
                     a.deadline = self.phase_deadline_monotonic
                 events.append(self._phase_event(now))     # phase first, so clients label it
@@ -384,9 +457,9 @@ class Game:
     def _expire_offers(self) -> list[Event]:
         events = []
         for o in self.offers.values():
-            if o.status == OfferStatus.PENDING:
+            if o.is_open:
                 o.status = OfferStatus.EXPIRED
-                events.append(Event.private("TradeUpdated", o.to_dict(), (o.seller_id, o.buyer_id)))
+                events.append(self._offer_event("TradeUpdated", o))
         return events
 
     def _resolve_movement(self, now: float) -> list[Event]:
@@ -437,8 +510,7 @@ class Game:
         if self.round_number in self._settled_rounds:
             raise AssertionError("round settled twice")
         self._settled_rounds.add(self.round_number)
-        self.phase = Phase.SETTLEMENT
-        self.phase_deadline_monotonic = now
+        self._enter_phase(Phase.SETTLEMENT, 0.0, now)
         events = [self._phase_event(now)]
         priority = {pid: i for i, pid in enumerate(self.player_priority_order)}
         for tile_id in sorted(self.auctions):
@@ -476,6 +548,7 @@ class Game:
 
     def _end_match(self, now: float) -> list[Event]:
         self.phase = Phase.ENDED
+        self.ready.clear()
         scores = []
         for pid in self.slot_order:
             p = self.players[pid]
@@ -546,92 +619,266 @@ class Game:
 
     # --------------------------------------------------------------- trades
 
-    def create_offer(self, pid: str, buyer_ref, property_id, price, now: float):
-        self._require_player(pid)
-        self._require_phase(Phase.NEGOTIATION, now)
-        prop = self._require_property(property_id)
-        buyer = self.resolve_player(buyer_ref)
-        price = self._require_int(price, "price", 1)
-        if prop.owner_id != pid:
-            raise GameError("NOT_OWNER", "you can only offer properties you own")
-        if buyer == pid:
-            raise GameError("INVALID_ARGUMENT", "cannot sell to yourself")
-        pending = [o for o in self.offers.values() if o.status == OfferStatus.PENDING]
-        if sum(o.seller_id == pid for o in pending) >= self.settings.max_pending_offers_per_seller:
-            raise GameError("LIMIT_EXCEEDED", "too many pending offers from you")
-        if sum(o.buyer_id == buyer for o in pending) >= self.settings.max_pending_offers_per_buyer:
-            raise GameError("LIMIT_EXCEEDED", "recipient has too many pending offers")
-        self._offer_counter += 1
-        offer = TradeOffer(f"o{self._offer_counter}", pid, buyer, prop.tile_id, price,
-                           self.round_number)
-        self.offers[offer.id] = offer
-        return offer.to_dict(), [Event.private("TradeOffered", offer.to_dict(), (buyer, pid))]
-
     def _require_offer(self, offer_id) -> TradeOffer:
         if not isinstance(offer_id, str) or offer_id not in self.offers:
             raise GameError("UNKNOWN_OFFER", "no such offer")
         return self.offers[offer_id]
 
+    def _group(self, offer: TradeOffer) -> list[TradeOffer]:
+        if offer.group is None:
+            return [offer]
+        return [o for o in self.offers.values() if o.group == offer.group]
+
+    def _offer_dict(self, offer: TradeOffer) -> dict:
+        return offer.to_dict(linked=len(self._group(offer)) - 1)
+
+    def _offer_event(self, etype: str, offer: TradeOffer, reason: Optional[str] = None) -> Event:
+        data = self._offer_dict(offer)
+        if reason:
+            data["reason"] = reason
+        return Event.private(etype, data, (offer.to_id, offer.from_id))
+
+    def _prop_list(self, value, name: str) -> tuple:
+        if not isinstance(value, list) or len(value) > MAX_TRADE_PROPS:
+            raise GameError("INVALID_ARGUMENT",
+                            f"{name} must be a list of at most {MAX_TRADE_PROPS} properties")
+        tiles = tuple(self._require_property(v).tile_id for v in value)
+        if len(set(tiles)) != len(tiles):
+            raise GameError("INVALID_ARGUMENT", f"{name} lists a property twice")
+        return tiles
+
+    def _close_group(self, members: list[TradeOffer], status: OfferStatus, reason: str,
+                     primary: Optional[TradeOffer] = None) -> list[Event]:
+        """Close every open offer in a group: ``primary`` gets ``status``, the rest INVALID.
+
+        With no ``primary``, every open member gets ``status``."""
+        events = []
+        for m in members:
+            if not m.is_open:
+                continue
+            if primary is None or m is primary:
+                m.status = status
+                events.append(self._offer_event("TradeUpdated", m, None if m is primary else reason))
+            else:
+                m.status = OfferStatus.INVALID
+                events.append(self._offer_event("TradeUpdated", m, reason))
+        return events
+
+    def describe_trade(self, offer: TradeOffer) -> str:
+        """Public wording: which properties moved. Amounts of credits are not published."""
+        def side(props, cash):
+            names = [TILES[t].name for t in props]
+            if cash:
+                names.append("credits")
+            return " + ".join(names)
+        return (f"{self.name_of(offer.from_id)} traded {side(offer.give_props, offer.give_cash)} "
+                f"to {self.name_of(offer.to_id)} for {side(offer.get_props, offer.get_cash)}")
+
+    def create_offer(self, pid: str, to_ref, give_props, give_cash, get_props, get_cash,
+                     now: float, link=None):
+        """Propose ``give_props`` + ``give_cash`` in exchange for ``get_props`` + ``get_cash``.
+
+        ``link`` names one of your pending offers; the new offer joins its group, and
+        the group settles only when every recipient has accepted.
+        """
+        self._require_player(pid)
+        self._require_phase(Phase.NEGOTIATION, now)
+        to = self.resolve_player(to_ref)
+        if to == pid:
+            raise GameError("INVALID_ARGUMENT", "cannot trade with yourself")
+        give = self._prop_list(give_props, "give")
+        get = self._prop_list(get_props, "get")
+        give_cash = self._require_int(give_cash, "give_cash", 0)
+        get_cash = self._require_int(get_cash, "get_cash", 0)
+        if give_cash and get_cash:
+            raise GameError("INVALID_ARGUMENT", "only one side of a trade can pay credits")
+        if not give and not get:
+            raise GameError("INVALID_ARGUMENT", "a trade must include at least one property")
+        if not (give or give_cash) or not (get or get_cash):
+            raise GameError("INVALID_ARGUMENT", "both sides of a trade must give something")
+        for t in give:
+            if self.properties[t].owner_id != pid:
+                raise GameError("NOT_OWNER", f"you do not own {TILES[t].name}")
+        for t in get:
+            if self.properties[t].owner_id != to:
+                raise GameError("NOT_OWNER", f"{self.name_of(to)} does not own {TILES[t].name}")
+        base, group = None, None
+        if link is not None:
+            base = self._require_offer(link)
+            if base.from_id != pid:
+                raise GameError("UNKNOWN_OFFER", "no such offer")
+            members = self._group(base)
+            if any(m.status != OfferStatus.PENDING for m in members):
+                raise GameError("OFFER_CLOSED", "can only link to offers nobody has answered yet")
+            if len(members) >= MAX_LINKED_OFFERS:
+                raise GameError("LIMIT_EXCEEDED", f"at most {MAX_LINKED_OFFERS} offers can be linked")
+            if {t for m in members for t in m.props} & set(give + get):
+                raise GameError("INVALID_ARGUMENT", "linked offers cannot share a property")
+            group = base.group or base.id
+        open_offers = [o for o in self.offers.values() if o.is_open]
+        if sum(o.from_id == pid for o in open_offers) >= self.settings.max_pending_offers_per_proposer:
+            raise GameError("LIMIT_EXCEEDED", "too many pending offers from you")
+        if sum(o.to_id == to for o in open_offers) >= self.settings.max_pending_offers_per_recipient:
+            raise GameError("LIMIT_EXCEEDED", "recipient has too many pending offers")
+        self._offer_counter += 1
+        offer = TradeOffer(f"o{self._offer_counter}", pid, to, give, give_cash, get, get_cash,
+                           self.round_number, group)
+        self.offers[offer.id] = offer
+        if base is not None:
+            base.group = group
+        events = [self._offer_event("TradeOffered", offer)]
+        if base is not None:
+            # Recipients of the earlier offers learn their offer is now conditional.
+            events += [self._offer_event("TradeUpdated", m) for m in self._group(offer)
+                       if m is not offer]
+        return self._offer_dict(offer), events
+
+    def _offer_problem(self, offer: TradeOffer) -> Optional[tuple[str, str, bool]]:
+        """Why ``offer`` cannot settle right now: (code, message, kills_the_offer)."""
+        for t in offer.give_props:
+            if self.properties[t].owner_id != offer.from_id:
+                return ("OFFER_INVALID", f"{self.name_of(offer.from_id)} no longer owns "
+                                         f"{TILES[t].name}", True)
+        for t in offer.get_props:
+            if self.properties[t].owner_id != offer.to_id:
+                return ("OFFER_INVALID", f"{self.name_of(offer.to_id)} no longer owns "
+                                         f"{TILES[t].name}", True)
+        if self.available_cash(offer.from_id) < offer.give_cash:
+            return ("OFFER_INVALID", f"{self.name_of(offer.from_id)} can no longer pay "
+                                     f"{offer.give_cash} credits", True)
+        if self.available_cash(offer.to_id) < offer.get_cash:
+            return ("INSUFFICIENT_FUNDS", f"need {offer.get_cash} credits, available "
+                                          f"{self.available_cash(offer.to_id)}", False)
+        return None
+
+    def _group_cash_problem(self, members: list[TradeOffer], acceptor: str):
+        """Linked offers settle together, so check each player's *combined* payment."""
+        delta: dict[str, int] = {}
+        for m in members:
+            cash = m.give_cash - m.get_cash          # what from_id pays to to_id
+            delta[m.from_id] = delta.get(m.from_id, 0) - cash
+            delta[m.to_id] = delta.get(m.to_id, 0) + cash
+        for pid, d in delta.items():
+            if d < 0 and self.available_cash(pid) < -d:
+                if pid == acceptor:
+                    return ("INSUFFICIENT_FUNDS", f"the linked trades need {-d} credits from you, "
+                                                  f"available {self.available_cash(pid)}", False)
+                return ("OFFER_INVALID", f"{self.name_of(pid)} cannot cover {-d} credits "
+                                         "across the linked trades", True)
+        return None
+
     def accept_offer(self, pid: str, offer_id, now: float):
         self._require_player(pid)
         offer = self._require_offer(offer_id)
-        if offer.buyer_id != pid:
+        if offer.to_id != pid:
             # Do not reveal anything about offers addressed to other players.
             raise GameError("UNKNOWN_OFFER", "no such offer")
         self._require_phase(Phase.NEGOTIATION, now)
         if offer.status != OfferStatus.PENDING:
             raise GameError("OFFER_CLOSED", f"offer is {offer.status.value}")
-        prop = self.properties[offer.property_id]
-        events = []
-        if prop.owner_id != offer.seller_id:
-            offer.status = OfferStatus.INVALID
-            events.append(Event.private("TradeUpdated", offer.to_dict(),
-                                        (offer.seller_id, offer.buyer_id)))
-            raise GameErrorWithEvents("OFFER_INVALID", "seller no longer owns the property", events)
-        if self.available_cash(pid) < offer.price:
-            raise GameError("INSUFFICIENT_FUNDS",
-                            f"need {offer.price} credits, available {self.available_cash(pid)}")
+        group = self._group(offer)
+        others = [m for m in group if m is not offer]
+        waiting = any(m.status == OfferStatus.PENDING for m in others)
+        problem = self._offer_problem(offer)
+        if problem is None and not waiting:
+            # Last acceptance: every linked offer must still be good, all at once.
+            for m in others:
+                problem = self._offer_problem(m)
+                if problem is not None:
+                    problem = (problem[0], problem[1], True)
+                    break
+            else:
+                problem = self._group_cash_problem(group, pid)
+        if problem is not None:
+            code, message, fatal = problem
+            if fatal:
+                raise GameErrorWithEvents(code, message, self._close_group(
+                    group, OfferStatus.INVALID, "a linked offer became invalid"))
+            raise GameError(code, message)
+        if waiting:
+            offer.status = OfferStatus.AGREED
+            return self._offer_dict(offer), [self._offer_event("TradeUpdated", offer)]
+
         # Atomic settlement: all checks passed, now commit everything.
-        self.players[pid].cash -= offer.price
-        self.players[offer.seller_id].cash += offer.price
-        self._transfer_property(offer.property_id, pid)
-        offer.status = OfferStatus.ACCEPTED
-        events.append(Event.private("TradeUpdated", offer.to_dict(),
-                                    (offer.seller_id, offer.buyer_id)))
-        for other in self.offers.values():
-            if other.status == OfferStatus.PENDING and other.property_id == offer.property_id:
-                other.status = OfferStatus.INVALID
-                events.append(Event.private("TradeUpdated", other.to_dict(),
-                                            (other.seller_id, other.buyer_id)))
-        events.append(Event("Notice", {"text": f"{self.name_of(offer.seller_id)} sold "
-                                               f"{TILES[offer.property_id].name} to "
-                                               f"{self.name_of(pid)}"}))
+        events, moved = [], set()
+        for m in group:
+            cash = m.give_cash - m.get_cash
+            self.players[m.from_id].cash -= cash
+            self.players[m.to_id].cash += cash
+            for t in m.give_props:
+                self._transfer_property(t, m.to_id)
+            for t in m.get_props:
+                self._transfer_property(t, m.from_id)
+            moved.update(m.props)
+            m.status = OfferStatus.ACCEPTED
+            events.append(self._offer_event("TradeUpdated", m))
+        for other in list(self.offers.values()):
+            if other.is_open and set(other.props) & moved:
+                events += self._close_group(self._group(other), OfferStatus.INVALID,
+                                            "a property in it was traded away")
+        for m in group:
+            events.append(Event("Notice", {"text": self.describe_trade(m)}))
         events.append(self._board_event(now))
-        return offer.to_dict(), events
+        return self._offer_dict(offer), events
 
     def reject_offer(self, pid: str, offer_id, now: float):
         self._require_player(pid)
         offer = self._require_offer(offer_id)
-        if offer.buyer_id != pid:
+        if offer.to_id != pid:
             raise GameError("UNKNOWN_OFFER", "no such offer")
         self._require_phase(Phase.NEGOTIATION, now)
         if offer.status != OfferStatus.PENDING:
             raise GameError("OFFER_CLOSED", f"offer is {offer.status.value}")
-        offer.status = OfferStatus.REJECTED
-        return offer.to_dict(), [Event.private("TradeUpdated", offer.to_dict(),
-                                               (offer.seller_id, offer.buyer_id))]
+        events = self._close_group(self._group(offer), OfferStatus.REJECTED,
+                                   "a linked offer was rejected", primary=offer)
+        return self._offer_dict(offer), events
 
     def cancel_offer(self, pid: str, offer_id, now: float):
         self._require_player(pid)
         offer = self._require_offer(offer_id)
-        if offer.seller_id != pid:
+        if offer.from_id != pid:
             raise GameError("UNKNOWN_OFFER", "no such offer")
         self._require_phase(Phase.NEGOTIATION, now)
-        if offer.status != OfferStatus.PENDING:
+        if not offer.is_open:
             raise GameError("OFFER_CLOSED", f"offer is {offer.status.value}")
-        offer.status = OfferStatus.CANCELLED
-        return offer.to_dict(), [Event.private("TradeUpdated", offer.to_dict(),
-                                               (offer.seller_id, offer.buyer_id))]
+        events = self._close_group(self._group(offer), OfferStatus.CANCELLED,
+                                   "a linked offer was cancelled", primary=offer)
+        return self._offer_dict(offer), events
+
+    # ---------------------------------------------------------------- ready
+
+    def set_ready(self, pid: str, round_no, phase, ready, now: float):
+        """Mark ``pid`` finished (or not) with the phase named by ``round_no``/``phase``.
+
+        The client names the phase it means, so a /ready that arrives after the
+        phase changed cannot end the next phase by accident.
+        """
+        self._require_player(pid)
+        if self.phase not in READY_PHASES:
+            raise GameError("WRONG_PHASE", f"nothing to be ready for during {self.phase.value}")
+        if type(ready) is not bool:
+            raise GameError("INVALID_ARGUMENT", "ready must be true or false")
+        if round_no != self.round_number or phase != self.phase.value:
+            raise GameError("STALE_PHASE", f"that phase is over (now round {self.round_number} "
+                                           f"{self.phase.value})")
+        if now >= self.phase_deadline_monotonic:
+            raise GameError("DEADLINE_PASSED", f"{self.phase.value} deadline has passed")
+        changed = (pid in self.ready) != ready
+        if ready:
+            self.ready.add(pid)
+        else:
+            self.ready.discard(pid)
+        result = {"ready": ready, "round": self.round_number, "phase": self.phase.value}
+        if not changed:
+            return result, []
+        return result, [self._ready_event(pid)]
+
+    def _ready_event(self, pid: str) -> Event:
+        connected = [p.id for p in self.players.values() if p.connected]
+        return Event("PlayerReady", {
+            "player": pid, "name": self.name_of(pid), "ready": pid in self.ready,
+            "round": self.round_number, "phase": self.phase.value,
+            "count": sum(p in self.ready for p in connected), "needed": len(connected)})
 
     # ------------------------------------------------------------- movement
 

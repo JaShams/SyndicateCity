@@ -1,15 +1,13 @@
 # alice (p1). Run with: scripts/run_client.sh 1 --script /opt/syndicate-city/demo/p1.txt
 # Timings assume scripts/demo.sh: 25s negotiation, 6s movement, 12s auction, 4 rounds.
+# Round 1 has no negotiation (nobody owns anything yet), so it opens in MOVEMENT.
 
-@round 1
-@wait 1
-/say Morning, syndicate. May the best crook win.
-@wait 9
-/tell dave Maybe. Let's see where we all end up first.
 @round 1 movement
 /move 1
 @round 1 auction
-@wait 1
+@wait 0.5
+/say Morning, syndicate. May the best crook win.
+@wait 0.5
 /bid Dockyard 150
 @wait 5
 /say We'll see about that, dave.
@@ -45,6 +43,7 @@
 /tell carol You sold him Purple? Unbelievable.
 @round 4 movement
 /move 3
+/ready
 @round 4 auction
 @wait 1
 /bid Tech Park 200

@@ -10,6 +10,9 @@ SC_LOG_DIR="${SC_LOG_DIR:-/var/log/syndicate-city}"
 SC_PYTHON="${SC_INSTALL_DIR}/venv/bin/python"
 SC_BUS_CONF="${SC_CONF_DIR}/bus.conf"
 SC_ROSTER="${SC_CONF_DIR}/roster.json"
+# Root-only record of the accounts and group setup.sh created or adopted, with their
+# UIDs/GIDs. --uninstall deletes only what is recorded as created and still matches.
+SC_ACCOUNTS_RECORD="${SC_CONF_DIR}/accounts.record"
 SC_SOCKET="${SC_RUN_DIR}/bus.sock"
 SC_ADDRESS_FILE="${SC_RUN_DIR}/bus.address"
 SC_PID_FILE="${SC_RUN_DIR}/bus.pid"

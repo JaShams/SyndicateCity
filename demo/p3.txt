@@ -1,16 +1,13 @@
 # carol (p3). Run with: scripts/run_client.sh 3 --script /opt/syndicate-city/demo/p3.txt
 
-@round 1
-@wait 5
-/say Nobody owns anything yet, bob. Including you.
-@wait 10
-/tell bob Noted.
 @round 1 movement
 /move 2
 @round 1 auction
 @wait 2
 /bid Old Town 150
-@wait 3
+@wait 1.5
+/say Nobody owned anything a minute ago, bob. Including you.
+@wait 1.5
 /tell bob Of course not ;)
 
 @round 2
@@ -41,6 +38,7 @@
 /say Everyone has a price.
 @round 4 movement
 /move 3
+/ready
 @round 4 auction
 @wait 1
 /buy Uptown

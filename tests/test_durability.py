@@ -36,7 +36,7 @@ def test_replay_rebuilds_identical_state_and_ledger(net_keys, tmp_path):
         s.roster = [(f"p{i+1}", 50000 + i, n) for i, n in enumerate(["alice", "bob", "carol", "dave"])]
         from game import Settings
         s.settings = Settings(rounds=2, negotiation_seconds=0.3, movement_seconds=0.3,
-                              auction_seconds=30)
+                              auction_seconds=30, skip_empty_negotiation=False)
         flog.open(header_for(s))
         await s.start(rounds=2, neg=0.3, mov=0.3, auc=30, log=flog)
         c = await s.connect_all()

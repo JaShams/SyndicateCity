@@ -33,9 +33,17 @@ HELP = """\
 /say <message>                      public chat            (NEGOTIATION/AUCTION)
 /tell <player> <message>            private chat
 /group <p1,p2,...> <message>        chat to selected players
-/offer <buyer> <property> <price>   offer one of your properties (NEGOTIATION)
+/offer <buyer> <property> <price>   sell one of your properties for credits (NEGOTIATION)
+/trade <player> give <items> get <items> [link <offer_id>]
+                                    any trade: items are properties and $credits,
+                                    joined by commas, e.g.
+                                    /trade bob give oldtown,$50 get techpark
+                                    link ties it to your offer <offer_id>: all of
+                                    them go through together, or none do
 /offers                             your pending offers
 /accept <offer_id>   /reject <offer_id>   /canceloffer <offer_id>
+/ready                              done with this phase; it ends early once
+                                    everyone connected is ready   (/unready undoes)
 /move <1|2|3>                       secret movement choice (MOVEMENT, editable)
 /buy <property>                     buy a property only you landed on, at its value (AUCTION)
 /bid <property> <amount>            sealed bid on a property you and others landed on
@@ -46,7 +54,8 @@ Properties may be given by tile number or name (e.g. 10 or techpark).
 Short forms: /m = /move, /b = /bid, /a = /accept, /r = /reject, /t = /tell, /s = /status"""
 
 ALIASES = {"/m": "/move", "/b": "/bid", "/a": "/accept", "/r": "/reject", "/t": "/tell",
-           "/s": "/status", "/p": "/players", "/h": "/help", "/q": "/quit"}
+           "/s": "/status", "/p": "/players", "/h": "/help", "/q": "/quit", "/done": "/ready",
+           "/d": "/ready"}
 
 SCRIPT_HELP = """\
 A script is a text file of client commands, run top to bottom. Blank lines and
@@ -86,6 +95,21 @@ CENTRE_W = 2 * CELL_W + 1
 def clean(value) -> str:
     """Escape anything that came off the wire before it reaches the terminal."""
     return sanitize_text(str(value))
+
+
+def trade_side(side: dict) -> str:
+    """'Dockyard + 50 credits' for one side of an offer."""
+    parts = [TILES[t].name for t in side["props"]]
+    if side["cash"]:
+        parts.append(f"{side['cash']} credits")
+    return " + ".join(parts) or "nothing"
+
+
+def linked_note(o: dict) -> str:
+    n = o.get("linked", 0)
+    if not n:
+        return ""
+    return f" [linked with {n} other offer{'s' if n > 1 else ''}: all or nothing]"
 
 
 class ClientUI:
@@ -277,14 +301,25 @@ class ClientUI:
             lines.append(self.render_offers())
         return "\n".join(lines)
 
+    def terms(self, o: dict) -> str:
+        """Both sides of an offer, from this player's point of view."""
+        if o["from"] == self.me:
+            return (f"you give {trade_side(o['give'])}; {self.name(o['to'])} gives "
+                    f"{trade_side(o['get'])}")
+        if o["to"] == self.me:
+            return (f"{self.name(o['from'])} gives {trade_side(o['give'])}; you give "
+                    f"{trade_side(o['get'])}")
+        return (f"{self.name(o['from'])} gives {trade_side(o['give'])}; {self.name(o['to'])} "
+                f"gives {trade_side(o['get'])}")
+
     def render_offers(self) -> str:
         if not self.offers:
             return "no pending offers"
         lines = []
         for o in self.offers.values():
-            direction = "OUT" if o["seller"] == self.me else "IN "
-            lines.append(f"  {direction} {o['offer_id']}: {self.name(o['seller'])} sells "
-                         f"{TILES[o['property_id']].name} to {self.name(o['buyer'])} for {o['price']}")
+            direction = "OUT" if o["from"] == self.me else "IN "
+            agreed = " (agreed, waiting on linked offers)" if o["status"] == "AGREED" else ""
+            lines.append(f"  {direction} {clean(o['offer_id'])}: {self.terms(o)}{linked_note(o)}{agreed}")
         return "\n".join(lines)
 
     # --------------------------------------------------------------- events
@@ -304,18 +339,21 @@ class ClientUI:
             self.public = d
             self.deadline = time.monotonic() + d.get("remaining", 0)
         elif t == "PhaseChanged":
+            new_round = d["round"] != self.public.get("round")
             self.public.update(round=d["round"], phase=d["phase"], priority=d["priority"],
-                               auctions=d["auctions"], remaining=d["remaining"])
+                               auctions=d["auctions"], remaining=d["remaining"], ready=[])
             self.deadline = time.monotonic() + d["remaining"]
-            if d["phase"] == "NEGOTIATION":
+            if new_round and d["phase"] in ("NEGOTIATION", "MOVEMENT"):
                 self.bids.clear()
                 self.movement = None
                 prio = " > ".join(self.name(p) for p in d["priority"])
-                self.out("SERVER", f"=== Round {d['round']} === NEGOTIATION for {d['remaining']:.0f}s. "
-                                   f"Tie-break priority: {prio}")
+                self.out("SERVER", f"=== Round {d['round']} === Tie-break priority: {prio}")
+            if d["phase"] == "NEGOTIATION":
+                self.out("SERVER", f"NEGOTIATION for {d['remaining']:.0f}s: chat and trade. "
+                                   "/ready when you are done")
             elif d["phase"] == "MOVEMENT":
                 self.out("SERVER", f"MOVEMENT: choose /move 1|2|3 within {d['remaining']:.0f}s "
-                                   "(default 1)")
+                                   "(default 1), then /ready")
             elif d["phase"] == "AUCTION":
                 self.out("SERVER", f"AUCTION open for {d['remaining']:.0f}s")
             elif d["phase"] == "SETTLEMENT":
@@ -344,19 +382,35 @@ class ClientUI:
                 self.out("GROUP", f"{sender} -> [{to}]: {text}")
         elif t in ("TradeOffered", "TradeUpdated"):
             o = d
-            prop = TILES[o["property_id"]].name
-            if o["status"] == "PENDING":
+            oid = clean(o["offer_id"])
+            if o["status"] in ("PENDING", "AGREED"):
                 self.offers[o["offer_id"]] = o
-                if o["buyer"] == self.me:
-                    self.out("TRADE", f"{self.name(o['seller'])} offers you {prop} for {o['price']} "
-                                      f"-> /accept {o['offer_id']} or /reject {o['offer_id']}")
-                else:
-                    self.out("TRADE", f"offer {o['offer_id']} sent: {prop} to "
-                                      f"{self.name(o['buyer'])} for {o['price']}")
             else:
                 self.offers.pop(o["offer_id"], None)
-                self.out("TRADE", f"offer {o['offer_id']} ({prop}, {o['price']}, "
-                                  f"{self.name(o['seller'])} -> {self.name(o['buyer'])}): {o['status']}")
+            if t == "TradeOffered":
+                if o["to"] == self.me:
+                    self.out("TRADE", f"{self.name(o['from'])} offers you a trade ({oid}): "
+                                      f"{self.terms(o)}{linked_note(o)} "
+                                      f"-> /accept {oid} or /reject {oid}")
+                else:
+                    self.out("TRADE", f"offer {oid} sent to {self.name(o['to'])}: "
+                                      f"{self.terms(o)}{linked_note(o)}")
+            elif o["status"] == "PENDING":       # another offer was linked to this one
+                self.out("TRADE", f"offer {oid} is now{linked_note(o) or ' unlinked'}")
+            elif o["status"] == "AGREED":
+                who = "you" if o["to"] == self.me else self.name(o["to"])
+                self.out("TRADE", f"{who} agreed to offer {oid}; it goes through once every "
+                                  "linked offer is accepted")
+            else:
+                reason = f" ({clean(o['reason'])})" if o.get("reason") else ""
+                self.out("TRADE", f"offer {oid} ({self.terms(o)}): {o['status']}{reason}")
+        elif t == "PlayerReady":
+            ready = set(self.public.get("ready") or [])
+            (ready.add if d["ready"] else ready.discard)(d["player"])
+            self.public["ready"] = sorted(ready)
+            who = "you are" if d["player"] == self.me else f"{clean(d['name'])} is"
+            state = "ready" if d["ready"] else "no longer ready"
+            self.out("SERVER", f"{who} {state} ({d['count']}/{d['needed']} ready)")
         elif t == "MovementRevealed":
             lines = []
             for m in d["moves"]:
@@ -475,6 +529,40 @@ class ClientUI:
             raise ValueError(ref)
         return idx
 
+    def parse_trade(self, args: list[str]) -> dict:
+        """``<player> give a,b,$50 get c [link o3]`` -> a CreateTradeOffer payload."""
+        if len(args) < 3:
+            raise ValueError
+        sections: dict[str, list[str]] = {"give": [], "get": [], "link": []}
+        current = None
+        for word in args[1:]:
+            if word.lower() in sections:
+                current = word.lower()
+            elif current is None:
+                raise ValueError(word)
+            else:
+                sections[current].append(word)
+        payload: dict = {"to": args[0]}
+        for side in ("give", "get"):
+            props, cash = [], None
+            for item in " ".join(sections[side]).replace("+", ",").split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if item.startswith("$"):
+                    if cash is not None:
+                        raise ValueError(item)
+                    cash = int(item[1:])
+                else:
+                    props.append(self._prop(item))
+            payload[f"{side}_props"] = props
+            payload[f"{side}_cash"] = cash or 0
+        if len(sections["link"]) > 1:
+            raise ValueError
+        if sections["link"]:
+            payload["link"] = sections["link"][0]
+        return payload
+
     async def _command(self, cmd: str, rest: str, args: list[str]) -> None:
         r = self.conn.request
         if cmd == "/help":
@@ -502,14 +590,24 @@ class ClientUI:
             if len(args) < 3:
                 raise ValueError
             buyer, price = args[0], int(args[-1])
-            await r("CreateTradeOffer", {"buyer": buyer, "property_id": self._prop(" ".join(args[1:-1])),
-                                         "price": price})
+            await r("CreateTradeOffer", {"to": buyer,
+                                         "give_props": [self._prop(" ".join(args[1:-1]))],
+                                         "get_cash": price})
+        elif cmd == "/trade":
+            await r("CreateTradeOffer", self.parse_trade(args))
         elif cmd in ("/accept", "/reject", "/canceloffer"):
             action = {"/accept": "AcceptTradeOffer", "/reject": "RejectTradeOffer",
                       "/canceloffer": "CancelTradeOffer"}[cmd]
             res = await r(action, {"offer_id": args[0]})
-            if cmd == "/accept":
-                self.out("TRADE", f"bought {TILES[res['property_id']].name} for {res['price']}")
+            if cmd == "/accept" and res["status"] == "ACCEPTED":
+                self.out("TRADE", f"trade {clean(res['offer_id'])} done: {self.terms(res)}")
+        elif cmd in ("/ready", "/unready"):
+            res = await r("Ready", {"round": self.public.get("round", 0),
+                                    "phase": self.public.get("phase") or "-",
+                                    "ready": cmd == "/ready"})
+            if cmd == "/ready" and res["ready"]:
+                self.out("SERVER", f"ready for the rest of {res['phase']}; it ends early once "
+                                   "everyone is ready (/unready to take it back)")
         elif cmd == "/move":
             res = await r("SubmitMovement", {"steps": int(args[0])})
             self.movement = res["steps"]
@@ -594,8 +692,8 @@ async def run_script(ui: ClientUI, steps: list[tuple[int, str, list]]) -> None:
 
             def incoming():
                 for o in ui.offers.values():
-                    if (o["buyer"] == ui.me and o["offer_id"] not in seen
-                            and (a[0] is None or a[0] in (o["seller"], ui.name(o["seller"]).lower()))):
+                    if (o["to"] == ui.me and o["status"] == "PENDING" and o["offer_id"] not in seen
+                            and (a[0] is None or a[0] in (o["from"], ui.name(o["from"]).lower()))):
                         return o
                 return None
             await ui.wait_until(lambda: incoming() is not None or ui.position() != where)
