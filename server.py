@@ -478,8 +478,9 @@ class Coordinator:
             await self.start_match()
         elif cmd == "status":
             snap = self.game.public_snapshot(self.gclock.now())
+            frozen = "" if self.gclock.running else " (as of the last committed command)"
             self.echo(f"round {snap['round']}/{snap['rounds']} phase {snap['phase']} "
-                      f"remaining {snap['remaining']}s auctions {snap['auctions']}")
+                      f"remaining {snap['remaining']}s{frozen} auctions {snap['auctions']}")
             self.echo(f"{self.log.status()}; {self.applied} commands applied")
             if self.latencies:
                 lat = sorted(self.latencies)
@@ -623,8 +624,12 @@ async def main_async(args) -> int:
     print(f"Syndicate City coordinator {server.unique_name} ({server.transport}) on {where}; "
           f"match {game.match_id}; {len(roster)} players; {settings.rounds} rounds; "
           f"{log_.status()}.")
-    print("Waiting for players. Type 'start' when everyone has joined, 'help' for commands.",
-          flush=True)
+    if game.phase == Phase.LOBBY:
+        print("Waiting for players. Type 'start' when everyone has joined, 'help' for commands.",
+              flush=True)
+    else:
+        print(f"Match in progress: round {game.round_number} phase {game.phase.value}; players "
+              "reconnect on their own. Type 'help' for commands.", flush=True)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

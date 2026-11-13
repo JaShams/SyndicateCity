@@ -305,7 +305,7 @@ ipc.py        communications library (single file)      game.py    pure rules en
 server.py     coordinator: auth binding, lock, clock     board.py   tile table
 cmdlog.py     command logs: memory, file, Raft           config/    bus policy template, roster example
 client.py     interactive terminal client                tests/     unit/integration/security/adversarial
-scripts/      setup, run, stop, demo, tests, package, net_keys.py (TLS certificate and tokens)
+scripts/      setup, run, stop, demo, cluster_demo, tests, package, net_keys.py (TLS, tokens)
 demo/         p1-p4.txt: scripted players for scripts/demo.sh
 ```
 
@@ -327,6 +327,8 @@ Three independent layers, each switched on by flags:
 ```
 
 Without any of these flags the game is exactly the single-machine D-Bus game of §1–§10.
+
+**Try it on one machine:** `sudo scripts/cluster_demo.sh` (after `sudo scripts/setup.sh`, needs `tmux`) opens three replicas and four players, each player as its own account, in one tmux window. `--auto` makes the players play `demo/` by themselves, `--tui` gives them the full-screen client, and `--single` runs one coordinator with a crash-proof log instead of a cluster. While it runs, `sudo scripts/cluster_demo.sh kill N` SIGKILLs replica N (pick the one printing `is the LEADER` to see a fail-over), `restart N` brings it back from its saved state, and `stop` ends the demo.
 
 ### 11.1 Network play
 
